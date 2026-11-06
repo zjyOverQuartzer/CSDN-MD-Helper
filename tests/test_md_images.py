@@ -3,7 +3,8 @@ import unittest
 import os
 from pathlib import Path
 
-from md_images import find_images, local_path, rewrite
+from md_images import (IMAGE_PLACEHOLDER, find_images, local_path, render_image_progress,
+                       restore_image_placeholders, rewrite)
 
 
 class MarkdownImagesTest(unittest.TestCase):
@@ -64,6 +65,21 @@ class MarkdownImagesTest(unittest.TestCase):
     def test_windows_parenthesized_directory_preserves_separator(self):
         source = str(self.root / '(笔记)' / 'a.png')
         self.assertEqual(local_path(source, self.md), (self.root / '(笔记)' / 'a.png').resolve())
+
+    def test_unresolved_images_are_inert_and_restorable(self):
+        text = ('正文\n![普通](./a.png "标题")\n<img src="./b.png" width="200">\n'
+                '![引用][pic]\n\n[pic]: ./c.png "引用标题"\n'
+                '`![代码](./ignore.png)`\n')
+        refs = find_images(text)
+        protected = render_image_progress(text, refs, [])
+        self.assertIn('!' + IMAGE_PLACEHOLDER + '[普通](./a.png "标题")', protected)
+        self.assertIn('<' + IMAGE_PLACEHOLDER + 'img src="./b.png" width="200">', protected)
+        self.assertIn('!' + IMAGE_PLACEHOLDER + '[引用][pic]', protected)
+        self.assertIn('`![代码](./ignore.png)`', protected)
+        self.assertEqual(restore_image_placeholders(protected), text)
+        partial = render_image_progress(text, refs, [(refs[0], 'https://i-blog.csdnimg.cn/a.png')])
+        self.assertIn('![普通](https://i-blog.csdnimg.cn/a.png "标题")', partial)
+        self.assertIn('<' + IMAGE_PLACEHOLDER + 'img src="./b.png"', partial)
 
 
 if __name__ == '__main__':

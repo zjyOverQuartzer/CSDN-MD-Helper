@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 from urllib.parse import unquote, urlsplit
 
+IMAGE_PLACEHOLDER = '\u200b\u2060'
+
 
 @dataclass(frozen=True)
 class ImageRef:
@@ -19,6 +21,7 @@ class ImageRef:
     # only replace the URL so alt text, title and HTML attributes are kept.
     reference_alt: str | None = None
     reference_title: str = ''
+    placeholder_at: int | None = None
 
     def replacement(self, url: str) -> str:
         if self.reference_alt is not None:
@@ -181,7 +184,8 @@ def find_images(text: str) -> list[ImageRef]:
             if parsed:
                 src_start, src_end, after_image = parsed
                 if src_start < src_end:
-                    refs.append(ImageRef(src_start, src_end, text[src_start:src_end]))
+                    refs.append(ImageRef(src_start, src_end, text[src_start:src_end],
+                                         placeholder_at=start + 1))
                 pos = after_image
                 continue
         elif after < len(visible) and visible[after] == "[":
@@ -190,12 +194,12 @@ def find_images(text: str) -> list[ImageRef]:
                 name = visible[after + 1:end_label] or alt
                 definition = definitions.get(_label(name))
                 if definition:
-                    refs.append(ImageRef(start, end_label + 1, definition[0], alt, definition[1]))
+                    refs.append(ImageRef(start, end_label + 1, definition[0], alt, definition[1], start + 1))
                 pos = end_label + 1
                 continue
         elif _label(alt) in definitions:
             src, title = definitions[_label(alt)]
-            refs.append(ImageRef(start, end_alt + 1, src, alt, title))
+            refs.append(ImageRef(start, end_alt + 1, src, alt, title, start + 1))
         pos = end_alt + 1
 
     # Inline HTML images are common when Typora specifies width/height.
@@ -206,7 +210,8 @@ def find_images(text: str) -> list[ImageRef]:
     for match in html_pattern.finditer(visible):
         group = "quoted" if match.group("q") else "bare"
         src_start, src_end = match.span(group)
-        refs.append(ImageRef(src_start, src_end, text[src_start:src_end]))
+        refs.append(ImageRef(src_start, src_end, text[src_start:src_end],
+                             placeholder_at=match.start() + 1))
     return sorted(refs, key=lambda ref: (ref.start, ref.end))
 
 
@@ -247,3 +252,32 @@ def rewrite(text: str, replacements: list[tuple[ImageRef, str]]) -> str:
         last = ref.end
     parts.append(text[last:])
     return "".join(parts)
+
+
+def restore_image_placeholders(text: str) -> str:
+    """Restore only markers inserted by this helper for unfinished images."""
+    text = text.replace('!' + IMAGE_PLACEHOLDER + '[', '![')
+    return re.sub('<' + IMAGE_PLACEHOLDER + r'(?=img\b)', '<', text, flags=re.IGNORECASE)
+
+
+def render_image_progress(text: str, refs: list[ImageRef],
+                          replacements: list[tuple[ImageRef, str]]) -> str:
+    """Keep unresolved local images inert until their CSDN URL is known."""
+    uploaded = dict(replacements)
+    edits: list[tuple[int, int, str]] = []
+    for ref in refs:
+        if ref in uploaded:
+            edits.append((ref.start, ref.end, ref.replacement(uploaded[ref])))
+        elif ref.placeholder_at is not None:
+            edits.append((ref.placeholder_at, ref.placeholder_at, IMAGE_PLACEHOLDER))
+        else:
+            raise ValueError('无法安全标记待上传图片')
+    parts: list[str] = []
+    last = 0
+    for start, end, value in sorted(edits):
+        if start < last:
+            raise ValueError('图片标记重叠，无法安全替换')
+        parts.extend((text[last:start], value))
+        last = end
+    parts.append(text[last:])
+    return ''.join(parts)
