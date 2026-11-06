@@ -229,6 +229,13 @@ class BrowserWorkflowTest(unittest.TestCase):
         self.assertIn('https://i-blog.csdnimg.cn/mock-1.png', editor_text(self.target))
         self.assertEqual(result.backup_path.read_text(encoding='utf-8'), '编辑器占位信息')
 
+    def test_backup_can_be_disabled_for_existing_editor_text(self):
+        self.fill_target('CSDN 默认示例')
+        result = self.run_process(mode='import', backup_existing=False)
+        self.assertIsNone(result.backup_path)
+        self.assertFalse((self.root / 'recovery').exists())
+        self.assertIn('Markdown 原文', editor_text(self.target))
+
     def test_zero_width_blank_is_treated_as_empty(self):
         self.fill_target('\ufeff\u200b\n')
         result = self.run_process(mode='auto')

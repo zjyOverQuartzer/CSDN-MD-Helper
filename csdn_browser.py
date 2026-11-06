@@ -334,7 +334,8 @@ def upload_one(page, path: Path, pending: deque, current_requests: set, *, timeo
 def process_article(target, markdown_path: Path, recovery_dir: Path,
                     notify=lambda message: None, *, timeout_ms: int = 60_000,
                     extra_hosts: set[str] | None = None, mode: str = 'auto',
-                    expected_before: str | None = None) -> ProcessResult:
+                    expected_before: str | None = None,
+                    backup_existing: bool = True) -> ProcessResult:
     """Import text first, then upload and replace each image in the same tab."""
     try:
         md_text = markdown_path.read_text(encoding='utf-8-sig')
@@ -356,7 +357,7 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
     working = render_image_progress(body, local_refs, [])
     safe_before = _protect_local_images(before, markdown_path)
     backup_path = None
-    if has_meaningful_text(before):
+    if backup_existing and has_meaningful_text(before):
         recovery_dir.mkdir(parents=True, exist_ok=True)
         backup_path = recovery_dir / f'编辑器备份_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:6]}.md'
         backup_path.write_text(before, encoding='utf-8')

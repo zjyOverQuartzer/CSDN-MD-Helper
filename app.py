@@ -64,7 +64,7 @@ class BrowserWorker(threading.Thread):
                 self.playwright = None
             raise
 
-    def process(self, markdown_path: Path, mode: str):
+    def process(self, markdown_path: Path, mode: str, backup_existing: bool):
         if not self.context:
             raise HelperError('请先点击“打开 CSDN”，并在新浏览器窗口里登录。')
         if not markdown_path.is_file():
@@ -72,15 +72,17 @@ class BrowserWorker(threading.Thread):
         target = choose_target(self.context)
         before = editor_text(target)
         if mode == 'import' and has_meaningful_text(before):
+            backup_note = ('工具会先保存一份本地备份。' if backup_existing
+                           else '当前未选择本地备份。')
             self.send('confirm_import', '当前 CSDN 编辑器已有正文。\n\n'
-                      '导入所选 Markdown 会替换当前正文；工具会先保存一份本地备份。\n\n是否继续？')
+                      f'导入所选 Markdown 会替换当前正文；{backup_note}\n\n是否继续？')
             if not self.answers.get():
                 self.send('log', '已取消：没有上传图片，也没有修改正文。')
                 return
         self.send('log', '正在同一篇 CSDN 文章中处理正文与图片，请勿编辑正文。')
         result = process_article(target, markdown_path, DATA_ROOT / 'recovery',
                                  lambda message: self.send('log', message),
-                                 mode=mode, expected_before=before)
+                                 mode=mode, expected_before=before, backup_existing=backup_existing)
         target.bring_to_front()
         action = '已将所选 Markdown 导入编辑器' if result.imported else '已修复编辑器中的原正文'
         message = (f'{action}：{result.image_count} 张图片、{result.reference_count} 处引用。\n'
@@ -129,6 +131,7 @@ class Application(tk.Tk):
         self.markdown_path = tk.StringVar()
         self.browser = tk.StringVar(value='Microsoft Edge')
         self.mode = tk.StringVar(value='import')
+        self.backup_existing = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value='先选择 Markdown 文件，再打开 CSDN。')
         self.busy = False
         self.browser_open = False
@@ -167,10 +170,13 @@ class Application(tk.Tk):
                   style='Body.TLabel').pack(anchor='w', pady=(0, 12))
 
         ttk.Label(outer, text='3  选择处理方式，然后开始处理', style='Step.TLabel').pack(anchor='w')
-        ttk.Radiobutton(outer, text='导入所选 Markdown（替换当前正文，已有正文会先备份）',
+        ttk.Radiobutton(outer, text='导入所选 Markdown（替换当前正文）',
                         variable=self.mode, value='import').pack(anchor='w', pady=(5, 2))
         ttk.Radiobutton(outer, text='仅修复编辑器当前正文中的本地图片（保留正文）',
-                        variable=self.mode, value='repair').pack(anchor='w', pady=(0, 5))
+                        variable=self.mode, value='repair').pack(anchor='w', pady=(0, 2))
+        self.backup_checkbox = ttk.Checkbutton(outer, text='处理前备份已有正文（可取消勾选）',
+                                               variable=self.backup_existing)
+        self.backup_checkbox.pack(anchor='w', pady=(0, 5))
         self.process_button = ttk.Button(outer, text='开始处理正文与图片', command=self.process)
         self.process_button.pack(anchor='w', pady=(0, 12))
 
@@ -215,6 +221,7 @@ class Application(tk.Tk):
         state = 'disabled' if value else 'normal'
         self.open_button.configure(state=state)
         self.process_button.configure(state=state)
+        self.backup_checkbox.configure(state=state)
         self.browser_combo.configure(state='disabled' if value or self.browser_open else 'readonly')
 
     def open_browser(self):
@@ -236,7 +243,7 @@ class Application(tk.Tk):
             return
         self.set_busy(True)
         self.status.set('正在处理，请在完成前不要修改文章正文。')
-        self.commands.put(('process', (Path(value), self.mode.get())))
+        self.commands.put(('process', (Path(value), self.mode.get(), self.backup_existing.get())))
 
     def poll_events(self):
         try:
