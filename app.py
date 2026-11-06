@@ -77,23 +77,17 @@ class BrowserWorker(threading.Thread):
             if not self.answers.get():
                 self.send('log', '已取消：没有上传图片，也没有修改正文。')
                 return
-        self.send('log', '正在打开空白临时编辑器，用于通过 CSDN 上传图片。')
-        scratch = self.context.new_page()
-        try:
-            scratch.goto(CSDN_EDITOR_URL, wait_until='domcontentloaded', timeout=60_000)
-            result = process_article(target, scratch, markdown_path, DATA_ROOT / 'recovery',
-                                     lambda message: self.send('log', message),
-                                     mode=mode, expected_before=before)
-            target.bring_to_front()
-            action = '已将所选 Markdown 导入编辑器' if result.imported else '已修复编辑器中的原正文'
-            message = (f'{action}：{result.image_count} 张图片、{result.reference_count} 处引用。\n'
-                       '请在 CSDN 预览中检查图片，再自行保存草稿或发布。')
-            if result.backup_path:
-                message += f'\n原正文备份：{result.backup_path}'
-            self.send('success', message)
-        finally:
-            if not scratch.is_closed():
-                scratch.close()
+        self.send('log', '正在同一篇 CSDN 文章中处理正文与图片，请勿编辑正文。')
+        result = process_article(target, markdown_path, DATA_ROOT / 'recovery',
+                                 lambda message: self.send('log', message),
+                                 mode=mode, expected_before=before)
+        target.bring_to_front()
+        action = '已将所选 Markdown 导入编辑器' if result.imported else '已修复编辑器中的原正文'
+        message = (f'{action}：{result.image_count} 张图片、{result.reference_count} 处引用。\n'
+                   '请在 CSDN 预览中检查图片，再自行保存草稿或发布。')
+        if result.backup_path:
+            message += f'\n原正文备份：{result.backup_path}'
+        self.send('success', message)
 
     def run(self):
         while True:
@@ -152,7 +146,7 @@ class Application(tk.Tk):
         outer = ttk.Frame(self, padding=(22, 18))
         outer.pack(fill='both', expand=True)
         ttk.Label(outer, text=APP_NAME, style='Title.TLabel').pack(anchor='w')
-        ttk.Label(outer, text='将本地图片上传到 CSDN，并自动替换文章中的图片路径。',
+        ttk.Label(outer, text='先导入完整正文，再上传本地图片并替换文章中的图片路径。',
                   style='Body.TLabel').pack(anchor='w', pady=(3, 15))
 
         ttk.Label(outer, text='1  选择本地 Markdown 文件', style='Step.TLabel').pack(anchor='w')
@@ -177,7 +171,7 @@ class Application(tk.Tk):
                         variable=self.mode, value='import').pack(anchor='w', pady=(5, 2))
         ttk.Radiobutton(outer, text='仅修复编辑器当前正文中的本地图片（保留正文）',
                         variable=self.mode, value='repair').pack(anchor='w', pady=(0, 5))
-        self.process_button = ttk.Button(outer, text='上传图片并替换链接', command=self.process)
+        self.process_button = ttk.Button(outer, text='开始处理正文与图片', command=self.process)
         self.process_button.pack(anchor='w', pady=(0, 12))
 
         ttk.Label(outer, text='处理进度', style='Step.TLabel').pack(anchor='w')
