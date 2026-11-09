@@ -60,52 +60,120 @@ class BrowserWorker(threading.Thread):
         # 使用场景：后台线程需要更新进度、请求确认或报告结果时使用。
         self.events.put((kind, message))  # 主线程按 kind 判断如何处理 message。
 
-    def open_browser(self, browser_name: str):
-        # 作用：启动或复用助手专用浏览器，并打开 CSDN 编辑器。
-        # 使用场景：用户点击“打开 CSDN”后执行；browser_name 指定 Edge 或 Chrome。
-        # 同一个助手窗口只维护一个浏览器上下文；窗口仍存在时直接复用。
-        if self.context:
-            # 只要上下文内还有未关闭的页面，认为已有助手浏览器可用。
-            if any(not page.is_closed() for page in self.context.pages):
-                self.send('log', '助手浏览器已经打开，请在该窗口里操作。')  # 告知用户复用现有窗口。
-                self.send('ready')  # 通知界面浏览器已就绪。
-                return  # 不再重复启动浏览器。
-            # 页面都已关闭时，先释放旧上下文和 Playwright，再重新启动。
-            self.context.close()
-            self.context = None  # 清空已关闭的上下文引用。
-            self.playwright.stop()  # 停止之前的 Playwright 实例。
-            self.playwright = None  # 清空已停止的实例引用。
-        # 在工作线程内导入并启动同步版 Playwright，之后由同一线程使用。
-        from playwright.sync_api import sync_playwright
-        self.playwright = sync_playwright().start()  # 启动后保存实例，供创建浏览器和退出时使用。
-        # 持久化 profile 使助手重启后仍有机会复用用户之前的登录状态。
-        profile = DATA_ROOT / ('edge-profile' if browser_name == 'Microsoft Edge' else 'chrome-profile')
-        profile.mkdir(parents=True, exist_ok=True)  # 首次运行时创建该浏览器的专用配置目录。
+    def _on_browser_closed(self, context):
+        # 作用：同步已关闭的浏览器上下文，并通知界面更新状态。
+        # 使用场景：用户关闭浏览器、浏览器退出或助手主动切换浏览器时调用。
+        if self.context is context:  # 避免旧上下文的延迟事件影响新浏览器。
+            closed_name = self.browser_name or ''
+            self.context = None
+            self.browser_name = None
+            self.send('browser_closed', closed_name)
+
+    def _poll_browser(self):
+        # 作用：短暂处理 Playwright 事件，让浏览器关闭通知及时到达。
+        # 使用场景：工作线程空闲时及执行新任务之前调用；不读取网页内容。
+        context = self.context
+        if context is None:
+            return
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         try:
+            # 同步版 Playwright 需要进入其事件循环，才能分发浏览器关闭事件。
+            context.wait_for_event('close', timeout=120)
+        except PlaywrightTimeoutError:
+            pass  # 等待超时表示浏览器仍在运行，之后继续接收任务。
+        except Exception:
+            # 驱动断开等异常下，当前上下文已无法继续使用。
+            self._on_browser_closed(context)
+
+    def _close_current_browser(self):
+        # 作用：关闭助手当前管理的浏览器上下文，并同步关闭状态。
+        # 使用场景：用户确认切换浏览器，或旧上下文已无页面时调用。
+        context = self.context
+        if context is None:
+            return
+        try:
+            context.close()
+        except Exception as exc:
+            # 如果关闭事件已到达，说明浏览器已关闭；否则停止切换以保护内容。
+            if self.context is context:
+                raise HelperError('无法关闭当前助手浏览器，请保存文章并手动关闭后重试。') from exc
+        self._on_browser_closed(context)  # close 事件已处理时不会重复发送通知。
+
+    def open_browser(self, browser_name: str):
+        # 作用：打开、重新显示或安全切换助手专用浏览器。
+        # 使用场景：用户点击“打开 CSDN”时执行；切换前会确认是否已保存文章。
+        self._poll_browser()  # 先处理可能尚未分发的关闭事件。
+        context = self.context
+        if context is not None:
+            pages = [page for page in context.pages if not page.is_closed()]
+            if not pages:
+                self._close_current_browser()  # 已无页面时清理旧上下文。
+            elif self.browser_name == browser_name:
+                try:
+                    pages[-1].bring_to_front()  # 相同浏览器已打开时，将现有页面切到前台。
+                except Exception as exc:
+                    self._poll_browser()  # 页面可能刚刚被用户关闭。
+                    if self.context is not None:
+                        raise HelperError('无法显示当前浏览器，请保存文章并关闭后重试。') from exc
+                else:
+                    self.send('log', f'{browser_name} 已经打开，已切换到该浏览器。')
+                    self.send('ready', browser_name)
+                    return
+            else:
+                current_name = self.browser_name or '当前浏览器'
+                self.send('confirm_switch',
+                          f'助手当前打开的是 {current_name}。切换到 {browser_name} 会关闭当前助手浏览器。\n\n'
+                          '请先保存浏览器中的文章，是否继续切换？')
+                confirmed = self.answers.get()  # 主线程显示确认框并返回用户选择。
+                self._poll_browser()  # 用户确认期间可能已自行关闭浏览器。
+                if not confirmed:
+                    self.send('log', '已取消切换浏览器。')
+                    if self.context is not None:
+                        self.send('ready', self.browser_name or current_name)
+                    return
+                self._close_current_browser()
+
+        # 所有 Playwright 调用都在此工作线程中执行；已启动的驱动可复用。
+        if self.playwright is None:
+            from playwright.sync_api import sync_playwright
+            self.playwright = sync_playwright().start()
+        try:
+            # 两种浏览器使用不同的持久化 profile，保留各自的登录状态。
+            profile = DATA_ROOT / ('edge-profile' if browser_name == 'Microsoft Edge' else 'chrome-profile')
+            profile.mkdir(parents=True, exist_ok=True)
             # 持久化上下文使用独立 profile；headless=False 让用户能看到并登录。
             self.context = self.playwright.chromium.launch_persistent_context(
                 str(profile), channel=BROWSERS[browser_name], headless=False, no_viewport=True,
             )
-            self.browser_name = browser_name  # 保存实际启动的浏览器名称。
+            self.browser_name = browser_name
+            self.context.on('close', self._on_browser_closed)  # 浏览器关闭后通知主界面。
             # 优先复用启动时自带的页面，没有页面时再新建。
             page = self.context.pages[0] if self.context.pages else self.context.new_page()
             # 等待页面主要 DOM 加载，最长等待 60 秒。
             page.goto(CSDN_EDITOR_URL, wait_until='domcontentloaded', timeout=60_000)
             self.send('log', f'{browser_name} 已打开。请在新窗口登录 CSDN，打开或新建 Markdown 文章。')  # 提示登录。
-            self.send('ready')  # 告诉主界面浏览器已成功打开。
+            self.send('ready', browser_name)  # 告诉主界面实际打开的浏览器。
         except Exception:
             # 启动任何一步出错都尽可能释放已创建的资源，再交给外层报告。
             if self.context:
-                self.context.close()  # 如果上下文已经创建，先关闭它。
-                self.context = None  # 清空引用，避免被误认为可用。
+                context = self.context
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                self._on_browser_closed(context)
             if self.playwright:
-                self.playwright.stop()  # 如果 Playwright 已启动，则将其停止。
-                self.playwright = None  # 清空引用。
+                try:
+                    self.playwright.stop()
+                except Exception:
+                    pass
+                self.playwright = None
             raise  # 重新抛出异常，由工作线程统一向界面报告。
 
     def process(self, markdown_path: Path, mode: str, backup_existing: bool):
         # 作用：选择目标页面、请求必要的确认，再调用正文处理流程。
         # 使用场景：用户开始处理后执行；参数包含文档路径、处理模式和备份选项。
+        self._poll_browser()  # 处理开始前刷新可能尚未收到的浏览器关闭事件。
         if not self.context:  # 没有助手浏览器时无法定位目标编辑器。
             raise HelperError('请先点击“打开 CSDN”，并在新浏览器窗口里登录。')
         if not markdown_path.is_file():  # 文件可能在选择后被移动或删除，因此再次检查。
@@ -143,7 +211,12 @@ class BrowserWorker(threading.Thread):
         # 使用场景：调用线程的 start() 后自动运行；队列收到 None 时退出。
         # 串行消费任务，None 是退出信号；Playwright 相关操作都留在此线程。
         while True:
-            item = self.commands.get()  # 队列为空时等待，不持续占用 CPU。
+            try:
+                # 浏览器打开时定期处理关闭事件；没有浏览器时继续阻塞等待任务。
+                item = self.commands.get(timeout=0.4 if self.context is not None else None)
+            except queue.Empty:
+                self._poll_browser()
+                continue
             if item is None:  # None 是主线程发来的退出信号。
                 break
             command, argument = item  # 命令名决定操作，argument 保存所需参数。
@@ -197,6 +270,7 @@ class Application(tk.Tk):
         self.progress_text = tk.StringVar(value='等待开始')  # 进度条旁边的说明文字。
         self.busy = False  # 当前是否正在执行任务。
         self.browser_open = False  # 助手浏览器是否已成功打开。
+        self.current_browser = None  # 记录实际打开的浏览器，与下拉框的当前选择区分。
         self.active_action = None  # 区分打开浏览器和处理文章，避免显示错误的进度状态。
         self.build_ui()  # 根据上述状态变量创建并排列控件。
         self._fit_minimum_window()  # 根据实际字体缩放调整最小尺寸，避免控件被挤出窗口。
@@ -277,7 +351,7 @@ class Application(tk.Tk):
                                       style='Secondary.TButton')
         self.file_button.pack(side='left', padx=(10, 0))  # 保留按钮和路径框之间的间距。
 
-        browser_card = self._make_card(page, '02', '打开 CSDN 并登录', '请在新窗口打开 Markdown 编辑器')
+        browser_card = self._make_card(page, '02', '打开 CSDN 并登录', '切换浏览器前请先保存文章')
         browser_row = tk.Frame(browser_card, background=colors['surface'])  # 浏览器选择和状态同一行。
         browser_row.pack(fill='x')
         self.browser_combo = ttk.Combobox(browser_row, textvariable=self.browser, values=list(BROWSERS),
@@ -419,8 +493,8 @@ class Application(tk.Tk):
         self.file_button.configure(state=state)  # 处理期间不能选择另一份文档。
         self.import_radio.configure(state=state)  # 处理期间固定导入模式。
         self.repair_radio.configure(state=state)  # 处理期间固定修复模式。
-        # 浏览器已经打开时也固定浏览器选择，避免与现有上下文不一致。
-        self.browser_combo.configure(state='disabled' if value or self.browser_open else 'readonly')
+        # 空闲时允许选择浏览器；切换已打开的浏览器时由后台请求用户确认。
+        self.browser_combo.configure(state='disabled' if value else 'readonly')
 
     def open_browser(self):
         # 作用：向后台线程提交打开浏览器的任务。
@@ -446,6 +520,12 @@ class Application(tk.Tk):
         if not self.browser_open:  # 页面由助手专用浏览器提供，需要先启动。
             messagebox.showwarning(APP_NAME, '请先打开 CSDN，在新窗口登录并进入 Markdown 编辑器。', parent=self)
             return  # 没有浏览器时无法继续。
+        if self.current_browser and self.browser.get() != self.current_browser:
+            # 下拉框只是待切换的选择，不能让用户误以为正文会写入另一个浏览器。
+            messagebox.showwarning(APP_NAME,
+                                   f'当前打开的是 {self.current_browser}。请先点击“打开 CSDN”完成浏览器切换，'
+                                   '或重新选择当前浏览器后再处理文章。', parent=self)
+            return
         self.active_action = 'process'
         self.progress_value.set(0)
         self.progress_text.set('正在准备…')
@@ -470,9 +550,20 @@ class Application(tk.Tk):
                 elif kind == 'ready':  # 浏览器启动成功。
                     # 后台已经成功打开浏览器，允许后续处理文章。
                     self.browser_open = True
-                    self.browser_status.set('浏览器已打开')
-                elif kind == 'confirm_import':  # 后台等待用户确认覆盖。
-                    # 在主线程显示确认框，再通过 answers 队列把选择交回后台。
+                    self.current_browser = message or self.browser.get()
+                    self.browser.set(self.current_browser)  # 切换取消时恢复实际打开的浏览器。
+                    self.browser_status.set(f'{self.current_browser} 已打开')
+                elif kind == 'browser_closed':  # 用户关闭浏览器后允许重新打开或切换。
+                    self.browser_open = False
+                    self.current_browser = None
+                    self.browser_status.set('正在打开浏览器…' if self.active_action == 'open' else '浏览器已关闭')
+                    notice = f'{message or "助手浏览器"} 已关闭，可重新打开或切换浏览器。'
+                    self.append_log(notice)
+                    if self.active_action != 'open':
+                        self.status.set(notice)
+                    self.browser_combo.configure(state='disabled' if self.busy else 'readonly')
+                elif kind in ('confirm_import', 'confirm_switch'):
+                    # 在主线程确认覆盖或切换，再通过 answers 队列把选择交回后台。
                     answer = messagebox.askyesno(APP_NAME, message, parent=self)
                     self.worker.answers.put(answer)  # 把 True/False 返回给工作线程。
                 elif kind == 'success':  # 正文处理完成。
@@ -487,14 +578,24 @@ class Application(tk.Tk):
                     self.append_log(message)  # 保留错误文本供用户查看。
                     self.status.set('处理未完成，请查看进度信息。')  # 更新状态栏。
                     if self.active_action == 'open':
-                        self.browser_open = False
-                        self.browser_status.set('浏览器未打开')
+                        if self.browser_open and self.current_browser:
+                            # 切换失败但原浏览器仍在时，恢复原来的选择和状态。
+                            self.browser.set(self.current_browser)
+                            self.browser_status.set(f'{self.current_browser} 已打开')
+                        else:
+                            self.browser_open = False
+                            self.current_browser = None
+                            self.browser_status.set('浏览器未打开')
                     elif self.active_action == 'process':
                         self.progress_text.set('处理未完成')
                     messagebox.showerror(APP_NAME, message, parent=self)  # 展示错误弹窗。
                 elif kind == 'idle':  # 后台完成本次任务后的统一状态。
                     # 后台本轮任务结束，允许用户继续操作。
                     self.set_busy(False)
+                    if (self.active_action == 'open' and not self.browser_open
+                            and self.browser_status.get() == '正在打开浏览器…'):
+                        # 用户在切换确认期间关闭浏览器后又取消，不能一直显示“正在打开”。
+                        self.browser_status.set('浏览器已关闭')
                     self.active_action = None
         except queue.Empty:
             pass  # 当前没有更多消息，等待下一次定时回调。
