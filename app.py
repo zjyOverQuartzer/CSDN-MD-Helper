@@ -24,18 +24,19 @@ DATA_ROOT = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'CSDN-MD-He
 # 左侧是界面显示名称，右侧是 Playwright 启动对应浏览器时使用的 channel。
 BROWSERS = {'Microsoft Edge': 'msedge', 'Google Chrome': 'chrome'}
 
-# 界面颜色集中定义，便于统一调整文字对比度、卡片和按钮样式。
+# 界面颜色集中定义：白色操作区搭配暖灰进度区，橙色只强调主要操作。
 UI_COLORS = {
-    'page': '#F2F5FA',  # 主页面背景。
+    'page': '#FAF9F8',  # 主页面背景。
     'surface': '#FFFFFF',  # 卡片和标题栏背景。
-    'border': '#DFE7F2',  # 卡片和输入框边框。
-    'text': '#172B49',  # 主要文字。
-    'muted': '#536780',  # 辅助说明和状态文字。
-    'brand': '#2456D3',  # 主按钮、进度条和步骤编号。
-    'brand_hover': '#1D46B5',  # 主按钮悬停或按下时的颜色。
-    'brand_light': '#EAF1FF',  # 次要按钮和步骤编号的浅色背景。
-    'field': '#F7F9FD',  # 输入框及日志区域背景。
-    'track': '#DFE8F6',  # 进度条尚未完成部分的背景。
+    'progress_surface': '#F6F2F0',  # 用轻微的暖色区分进度区域。
+    'border': '#DFDDDB',  # 分区、输入框和分隔线的边框。
+    'text': '#24313A',  # 主要文字。
+    'muted': '#59636B',  # 辅助说明和状态文字。
+    'brand': '#C84D2C',  # 主按钮、图标和进度条。
+    'brand_hover': '#A83A20',  # 主按钮悬停或按下时的颜色。
+    'brand_light': '#F7EBE6',  # 次要按钮的悬停背景。
+    'field': '#FFFFFF',  # 输入框及日志区域背景。
+    'track': '#E7E4E2',  # 进度条尚未完成部分的背景。
 }
 
 
@@ -252,8 +253,8 @@ class Application(tk.Tk):
         # 使用场景：创建 Application 实例时自动调用。
         super().__init__()  # 初始化 Tk 主窗口。
         self.title(APP_NAME)  # 设置窗口标题。
-        self.geometry('860x760')  # 为分组卡片和进度区域预留初始空间。
-        self.minsize(720, 620)  # 防止窗口缩得过小而无法使用。
+        self.geometry('1060x720')  # 为并排的操作区和进度区预留初始空间。
+        self.minsize(880, 620)  # 防止窗口缩得过小而无法使用。
         self.configure(background=UI_COLORS['page'])  # 统一窗口的浅色背景。
         # Tk 控件只由主线程更新，两个队列负责与浏览器后台线程传递消息。
         self.commands: queue.Queue = queue.Queue()
@@ -278,161 +279,369 @@ class Application(tk.Tk):
         self.protocol('WM_DELETE_WINDOW', self.close_app)  # 接管窗口关闭操作，先做必要确认。
 
     def build_ui(self):
-        # 作用：创建顶部说明、操作卡片、图片进度和处理日志。
-        # 使用场景：窗口初始化时调用；所有控件仍使用原来的变量和处理方法。
-        colors = UI_COLORS  # 使用统一调色板，避免各个控件颜色不一致。
-        style = ttk.Style(self)  # 创建 ttk 组件样式管理器。
-        # clam 主题支持统一设置按钮、输入框和进度条颜色。
-        if 'clam' in style.theme_names():
+        # 作用：按用户选择的方案创建左侧操作区和右侧进度区。
+        # 使用场景：窗口初始化时调用；原有变量、按钮回调和后台处理流程保持不变。
+        colors = UI_COLORS
+        style = ttk.Style(self)
+        if 'clam' in style.theme_names():  # clam 允许在 Windows 上统一调整控件配色。
             style.theme_use('clam')
-        # 主按钮使用蓝底白字，并为禁用、按下和悬停状态分别设置颜色。
+
+        # 主按钮使用橙色；次要按钮保持浅色，并分别设置禁用、悬停和键盘焦点状态。
         style.configure('Primary.TButton', font=('Microsoft YaHei UI', 10, 'bold'),
                         foreground='#FFFFFF', background=colors['brand'], borderwidth=0,
-                        padding=(17, 8), focuscolor=colors['brand'])
+                        padding=(16, 9), focuscolor=colors['text'])
         style.map('Primary.TButton',
-                  background=[('disabled', '#A8B7CD'), ('pressed', colors['brand_hover']),
-                              ('active', colors['brand_hover'])],
-                  foreground=[('disabled', '#FFFFFF')])
-        # 次要按钮使用浅蓝背景，视觉上与主要的“开始处理”按钮区分。
+                  background=[('disabled', '#C8B2AA'), ('pressed', colors['brand_hover']),
+                              ('active', colors['brand_hover'])], foreground=[('disabled', '#FFFFFF')])
         style.configure('Secondary.TButton', font=('Microsoft YaHei UI', 10),
-                        foreground=colors['brand'], background=colors['brand_light'],
-                        borderwidth=0, padding=(14, 8), focuscolor=colors['brand_light'])
+                        foreground=colors['text'], background='#F5F4F3',
+                        bordercolor='#8A8886', lightcolor='#8A8886', darkcolor='#8A8886',
+                        borderwidth=1, padding=(12, 7), focuscolor=colors['brand'])
         style.map('Secondary.TButton',
-                  background=[('disabled', '#E9EDF3'), ('active', '#DCE8FF')],
-                  foreground=[('disabled', '#78889C')])
-        # 输入框和浏览器下拉框统一使用浅色背景与细边框。
-        style.configure('Form.TEntry', fieldbackground=colors['field'],
-                        foreground=colors['text'], bordercolor=colors['border'],
-                        lightcolor=colors['border'], darkcolor=colors['border'], padding=(9, 7))
-        style.configure('Form.TCombobox', fieldbackground=colors['field'],
-                        foreground=colors['text'], background=colors['field'],
-                        bordercolor=colors['border'], padding=(8, 6))
-        style.map('Form.TCombobox',
-                  fieldbackground=[('readonly', colors['field']), ('disabled', '#E9EDF3')],
-                  foreground=[('disabled', '#78889C')])
-        # 单选框、复选框的背景与白色卡片保持一致。
-        style.configure('Choice.TRadiobutton', background=colors['surface'],
-                        foreground=colors['text'], font=('Microsoft YaHei UI', 10), padding=(0, 2))
-        style.map('Choice.TRadiobutton', background=[('active', colors['surface'])])
-        style.configure('Choice.TCheckbutton', background=colors['surface'],
-                        foreground=colors['text'], font=('Microsoft YaHei UI', 9), padding=(0, 2))
-        style.map('Choice.TCheckbutton', background=[('active', colors['surface'])])
-        # 进度条的蓝色部分表示已成功替换链接的图片比例。
+                  background=[('disabled', '#EDEBEA'), ('pressed', '#EAD8D1'),
+                              ('active', colors['brand_light'])],
+                  foreground=[('disabled', '#797979')])
+
+        # 保留原生输入框和下拉选择；焦点边框与主色一致，便于键盘操作。
+        style.configure('Form.TEntry', fieldbackground=colors['field'], foreground=colors['text'],
+                        bordercolor='#8A8886', lightcolor='#8A8886', darkcolor='#8A8886', padding=(9, 7))
+        style.map('Form.TEntry', bordercolor=[('focus', colors['brand'])],
+                  lightcolor=[('focus', colors['brand'])], darkcolor=[('focus', colors['brand'])])
+        style.configure('Form.TCombobox', fieldbackground=colors['field'], foreground=colors['text'],
+                        background='#F5F4F3', bordercolor='#8A8886', padding=(8, 6))
+        style.map('Form.TCombobox', fieldbackground=[('readonly', colors['field']), ('disabled', '#EDEBEA')],
+                  foreground=[('disabled', '#797979')], bordercolor=[('focus', colors['brand'])])
+        style.configure('Choice.TRadiobutton', background=colors['surface'], foreground=colors['text'],
+                        font=('Microsoft YaHei UI', 10), padding=(0, 2))
+        style.map('Choice.TRadiobutton', background=[('active', colors['surface'])],
+                  indicatorcolor=[('selected', colors['brand'])])
+        style.configure('Choice.TCheckbutton', background=colors['surface'], foreground=colors['text'],
+                        font=('Microsoft YaHei UI', 10), padding=(0, 2))
+        style.map('Choice.TCheckbutton', background=[('active', colors['surface'])],
+                  indicatorcolor=[('selected', colors['brand'])])
         style.configure('Upload.Horizontal.TProgressbar', troughcolor=colors['track'],
                         background=colors['brand'], bordercolor=colors['track'],
-                        lightcolor=colors['brand'], darkcolor=colors['brand'], thickness=8)
+                        lightcolor=colors['brand'], darkcolor=colors['brand'], thickness=9)
 
-        # 顶部区域突出工具名称和用途，不显示无法确认的登录状态。
-        header = tk.Frame(self, background=colors['surface'], padx=24, pady=13)  # 创建白色标题栏。
-        header.pack(fill='x')  # 标题栏横向填充窗口。
-        # 左侧蓝色标识和标题说明；右侧展示“不需要额外图床”的提示。
-        tk.Label(header, text='M', background=colors['brand'], foreground='#FFFFFF',
-                 font=('Microsoft YaHei UI', 16, 'bold'), width=3, height=1).pack(side='left')
-        heading = tk.Frame(header, background=colors['surface'])  # 标题和副标题容器。
-        heading.pack(side='left', padx=(12, 0), fill='x', expand=True)  # 随窗口宽度伸展。
-        tk.Label(heading, text=APP_NAME, background=colors['surface'], foreground=colors['text'],
-                 font=('Microsoft YaHei UI', 16, 'bold'), anchor='w').pack(fill='x')
-        tk.Label(heading, text='导入 Markdown 正文，自动上传并替换本地图片',
-                 background=colors['surface'], foreground=colors['muted'],
-                 font=('Microsoft YaHei UI', 9), anchor='w').pack(fill='x', pady=(2, 0))
-        tk.Label(header, text='无需额外图床', background=colors['brand_light'],
-                 foreground=colors['brand'], font=('Microsoft YaHei UI', 9, 'bold'),
-                 padx=10, pady=5).pack(side='right')
+        # 标题说明这是一项什么任务；不把原型图中的“方案一”放进正式界面。
+        self.header = tk.Frame(self, background=colors['page'], padx=24, pady=14)
+        self.header.pack(fill='x')
+        title_label = tk.Label(self.header, text=APP_NAME, background=colors['page'], foreground=colors['text'],
+                               font=('Microsoft YaHei UI', 17, 'bold'), anchor='w', justify='left')
+        title_label.pack(fill='x')
+        title_label.bind('<Configure>', self._wrap_label_to_width)
+        subtitle = tk.Label(self.header, text='导入 Markdown 正文，上传并替换本地图片', background=colors['page'],
+                            foreground=colors['muted'], font=('Microsoft YaHei UI', 9), anchor='w', justify='left')
+        subtitle.pack(fill='x', pady=(3, 0))
+        subtitle.bind('<Configure>', self._wrap_label_to_width)
 
-        # 四个卡片对应选文件、打开浏览器、处理文章和查看结果。
-        page = tk.Frame(self, background=colors['page'])  # 承载步骤卡片的主区域。
-        page.pack(fill='both', expand=True, padx=20, pady=(12, 12))  # 随窗口大小伸展。
-        file_card = self._make_card(page, '01', '选择 Markdown 文件', '支持 .md / .markdown')
-        file_row = tk.Frame(file_card, background=colors['surface'])  # 文档路径和按钮同一行。
-        file_row.pack(fill='x')
-        self.file_entry = ttk.Entry(file_row, textvariable=self.markdown_path, style='Form.TEntry')
-        self.file_entry.pack(side='left', fill='x', expand=True)  # 路径框占据剩余横向空间。
-        self.file_button = ttk.Button(file_row, text='选择文件…', command=self.select_file,
+        # 外层画布只在内容超出窗口时滚动；窄窗口中两栏会自动改为上下排列。
+        page_host = tk.Frame(self, background=colors['page'])
+        page_host.pack(fill='both', expand=True, padx=20, pady=(0, 20))
+        page_host.grid_rowconfigure(0, weight=1)
+        page_host.grid_columnconfigure(0, weight=1)
+        self.page_canvas = tk.Canvas(page_host, background=colors['page'], highlightthickness=0,
+                                     borderwidth=0, width=850, height=520, takefocus=0)
+        self.page_canvas.grid(row=0, column=0, sticky='nsew')
+        self.page_scrollbar = ttk.Scrollbar(page_host, orient='vertical', command=self.page_canvas.yview)
+        self.page_canvas.configure(yscrollcommand=self.page_scrollbar.set)
+        page = tk.Frame(self.page_canvas, background=colors['page'])
+        self.page_content = page
+        self.page_window = self.page_canvas.create_window(0, 0, anchor='nw', window=page)
+        self._page_layout_pending = False
+        self._page_scroll_visible = False
+        self._stacked_layout = None
+        self._compact_form_layout = None
+
+        # 左右分区分别承担操作和观察进度；扩大窗口时两个区域一起伸展。
+        page.grid_rowconfigure(0, weight=1)
+        page.grid_columnconfigure(0, weight=5)
+        page.grid_columnconfigure(1, weight=4)
+        self.task_panel = tk.Frame(page, background=colors['surface'], highlightbackground=colors['border'],
+                                   highlightthickness=1, borderwidth=0)
+        self.task_panel.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+        self.activity_panel = tk.Frame(page, background=colors['progress_surface'],
+                                       highlightbackground=colors['border'], highlightthickness=1, borderwidth=0)
+        self.activity_panel.grid(row=0, column=1, sticky='nsew', padx=(8, 0))
+        left = tk.Frame(self.task_panel, background=colors['surface'], padx=20, pady=16)
+        left.pack(fill='both', expand=True)
+        right = tk.Frame(self.activity_panel, background=colors['progress_surface'], padx=20, pady=16)
+        right.pack(fill='both', expand=True)
+
+        # 文档输入沿用可编辑路径和文件选择按钮，已有 Markdown 解析逻辑无需更改。
+        self._section_heading(left, '文档文件', 'document', colors['surface'])
+        self._description(left, '选择本地 Markdown 文件，支持 .md 和 .markdown。', colors['surface'])
+        self.file_row = tk.Frame(left, background=colors['surface'])
+        self.file_row.pack(fill='x', pady=(8, 0))
+        self.file_entry = ttk.Entry(self.file_row, textvariable=self.markdown_path, style='Form.TEntry', width=20)
+        self.file_button = ttk.Button(self.file_row, text='选择文件…', command=self.select_file,
                                       style='Secondary.TButton')
-        self.file_button.pack(side='left', padx=(10, 0))  # 保留按钮和路径框之间的间距。
+        self.file_button.pack(side='right', padx=(10, 0))
+        self.file_entry.pack(side='left', fill='x', expand=True)
 
-        browser_card = self._make_card(page, '02', '打开 CSDN 并登录', '切换浏览器前请先保存文章')
-        browser_row = tk.Frame(browser_card, background=colors['surface'])  # 浏览器选择和状态同一行。
-        browser_row.pack(fill='x')
-        self.browser_combo = ttk.Combobox(browser_row, textvariable=self.browser, values=list(BROWSERS),
-                                          state='readonly', width=19, style='Form.TCombobox')
-        self.browser_combo.pack(side='left')  # 下拉框只允许选择预设浏览器。
-        self.open_button = ttk.Button(browser_row, text='打开 CSDN', command=self.open_browser,
+        self._divider(left, colors['surface'])
+        self._section_heading(left, '浏览器', 'browser', colors['surface'])
+        self._description(left, '打开助手浏览器后，请登录并进入 Markdown 编辑器。', colors['surface'])
+        self.browser_row = tk.Frame(left, background=colors['surface'])
+        self.browser_row.pack(fill='x', pady=(8, 0))
+        self.browser_combo = ttk.Combobox(self.browser_row, textvariable=self.browser, values=list(BROWSERS),
+                                          state='readonly', width=16, style='Form.TCombobox')
+        self.open_button = ttk.Button(self.browser_row, text='打开 CSDN', command=self.open_browser,
                                        style='Secondary.TButton')
-        self.open_button.pack(side='left', padx=(10, 0))  # 打开按钮跟随下拉框。
-        # 只展示浏览器是否打开，不判断用户是否已经登录 CSDN。
-        tk.Label(browser_row, textvariable=self.browser_status, background=colors['surface'],
-                 foreground=colors['muted'], font=('Microsoft YaHei UI', 9)).pack(side='left', padx=(12, 0))
+        self.open_button.pack(side='right', padx=(10, 0))
+        self.browser_combo.pack(side='left', fill='x', expand=True)
+        # 只展示浏览器是否打开，不推测 CSDN 的登录状态。
+        tk.Label(left, textvariable=self.browser_status, background=colors['surface'], foreground=colors['muted'],
+                 font=('Microsoft YaHei UI', 9), anchor='w').pack(fill='x', pady=(5, 0))
 
-        mode_card = self._make_card(page, '03', '选择处理方式', '处理期间请勿编辑文章')
-        self.import_radio = ttk.Radiobutton(mode_card, text='导入所选 Markdown（替换当前正文）',
-                                            variable=self.mode, value='import', style='Choice.TRadiobutton')
-        self.import_radio.pack(anchor='w')  # 默认导入所选文档。
-        self.repair_radio = ttk.Radiobutton(mode_card, text='仅修复当前正文中的本地图片（保留正文）',
-                                            variable=self.mode, value='repair', style='Choice.TRadiobutton')
-        self.repair_radio.pack(anchor='w')  # 可切换为保留正文的修复模式。
-        action_row = tk.Frame(mode_card, background=colors['surface'])  # 主按钮和备份选项同一行。
-        action_row.pack(fill='x', pady=(5, 0))
-        self.process_button = ttk.Button(action_row, text='开始处理正文与图片', command=self.process,
-                                          style='Primary.TButton')
-        self.process_button.pack(side='left')  # 点击后执行原有处理流程。
-        self.backup_checkbox = ttk.Checkbutton(action_row, text='处理前备份已有正文',
+        self._divider(left, colors['surface'])
+        self._section_heading(left, '处理方式', 'settings', colors['surface'])
+        self.choices = tk.Frame(left, background=colors['surface'])
+        self.choices.pack(fill='x', pady=(6, 0))
+        self.import_radio = ttk.Radiobutton(self.choices, text='导入 Markdown', variable=self.mode,
+                                            value='import', style='Choice.TRadiobutton')
+        self.import_radio.pack(side='left', padx=(0, 22))
+        self.repair_radio = ttk.Radiobutton(self.choices, text='仅修复图片', variable=self.mode,
+                                            value='repair', style='Choice.TRadiobutton')
+        self.repair_radio.pack(side='left')
+        self._description(left, '导入会替换当前正文；仅修复图片会保留正文。', colors['surface'], top=5)
+        self.backup_checkbox = ttk.Checkbutton(left, text='处理前备份已有正文',
                                                variable=self.backup_existing, style='Choice.TCheckbutton')
-        self.backup_checkbox.pack(side='left', padx=(16, 0))  # 备份选项默认勾选，用户可取消。
+        self.backup_checkbox.pack(anchor='w', pady=(12, 0))
+        self.process_button = ttk.Button(left, text='开始处理正文与图片', command=self.process,
+                                          style='Primary.TButton')
+        self.process_button.pack(fill='x', pady=(14, 0))
 
-        progress_card = self._make_card(page, '04', '处理进度', '完成后请检查预览并自行保存', expand=True)
-        progress_row = tk.Frame(progress_card, background=colors['surface'])  # 进度条与数字提示同一行。
-        progress_row.pack(fill='x', pady=(0, 7))
-        tk.Label(progress_row, textvariable=self.progress_text, background=colors['surface'],
-                 foreground=colors['muted'], font=('Microsoft YaHei UI', 9),
-                 anchor='e').pack(side='right', padx=(10, 0))
-        self.progress_bar = ttk.Progressbar(progress_row, variable=self.progress_value, maximum=100,
+        # 进度文字、进度条和日志保留原状态变量；处理时日志随右侧区域扩展。
+        self._section_heading(right, '处理进度', 'progress', colors['progress_surface'])
+        tk.Label(right, textvariable=self.progress_text, background=colors['progress_surface'],
+                 foreground=colors['muted'], font=('Microsoft YaHei UI', 10), anchor='w').pack(fill='x', pady=(8, 5))
+        self.progress_bar = ttk.Progressbar(right, variable=self.progress_value, maximum=100,
                                              style='Upload.Horizontal.TProgressbar')
-        self.progress_bar.pack(side='left', fill='x', expand=True)  # 进度条随窗口宽度伸展。
-        # 当前状态放在底部，日志区域占用卡片的剩余高度。
-        tk.Label(progress_card, textvariable=self.status, background=colors['surface'],
-                 foreground=colors['muted'], font=('Microsoft YaHei UI', 9), anchor='w',
-                 wraplength=650).pack(side='bottom', fill='x', pady=(7, 0))
-        log_frame = tk.Frame(progress_card, background=colors['field'])  # 日志框及滚动条的容器。
+        self.progress_bar.pack(fill='x')
+        self._divider(right, colors['progress_surface'])
+        self._section_heading(right, '处理日志', 'log', colors['progress_surface'])
+        # 状态栏保持两行，长文件名的完整内容仍可在下方可滚动日志中查看。
+        self.status_label = tk.Label(right, textvariable=self.status, background=colors['progress_surface'],
+                                     foreground=colors['muted'], font=('Microsoft YaHei UI', 9),
+                                     anchor='w', justify='left', wraplength=280, height=2)
+        self.status_label.pack(fill='x', pady=(6, 8))
+        self.status_label.bind('<Configure>', self._wrap_label_to_width)
+        log_frame = tk.Frame(right, background=colors['field'], highlightbackground='#C9C7C5',
+                             highlightthickness=1, borderwidth=0)
         log_frame.pack(fill='both', expand=True)
-        self.log = tk.Text(log_frame, height=5, wrap='word', state='disabled',
+        self.log = tk.Text(log_frame, width=25, height=5, wrap='word', state='disabled',
                            font=('Microsoft YaHei UI', 9), relief='flat', borderwidth=0,
                            background=colors['field'], foreground=colors['text'],
-                           padx=9, pady=7, highlightthickness=0)
+                           padx=10, pady=8, highlightthickness=0)
         scroll = ttk.Scrollbar(log_frame, orient='vertical', command=self.log.yview)
-        self.log.configure(yscrollcommand=scroll.set)  # 文本与滚动条互相同步。
-        self.log.pack(side='left', fill='both', expand=True)  # 日志框占用主要空间。
-        scroll.pack(side='right', fill='y')  # 滚动条在右侧纵向排列。
-        self.append_log('原 Markdown 文件不会被改写；处理完成后请自行检查并发布。')  # 初始提示。
+        self.log.configure(yscrollcommand=scroll.set)
+        self.log.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+        self.append_log('原 Markdown 文件不会被改写；处理完成后请自行检查并发布。')
 
-    def _make_card(self, parent, number: str, title: str, hint: str, *, expand: bool = False):
-        # 作用：创建统一样式的步骤卡片，并返回用于放置控件的内部容器。
-        # 使用场景：构建四个操作区域时复用；expand 为 True 时填满剩余空间。
-        colors = UI_COLORS  # 使用与主界面一致的颜色。
-        card = tk.Frame(parent, background=colors['surface'], highlightbackground=colors['border'],
-                        highlightthickness=1, borderwidth=0)  # 用浅色描边区分卡片。
-        card.pack(fill='both' if expand else 'x', expand=expand, pady=(0, 8))  # 日志卡片可向下伸展。
-        content = tk.Frame(card, background=colors['surface'], padx=15, pady=9)  # 设置卡片内边距。
-        content.pack(fill='both', expand=True)
-        heading = tk.Frame(content, background=colors['surface'])  # 放置步骤编号、标题和辅助提示。
-        heading.pack(fill='x', pady=(0, 7))
-        tk.Label(heading, text=number, background=colors['brand_light'], foreground=colors['brand'],
-                 font=('Microsoft YaHei UI', 9, 'bold'), width=3, pady=2).pack(side='left')
-        tk.Label(heading, text=title, background=colors['surface'], foreground=colors['text'],
-                 font=('Microsoft YaHei UI', 10, 'bold')).pack(side='left', padx=(9, 0))
-        tk.Label(heading, text=hint, background=colors['surface'], foreground=colors['muted'],
-                 font=('Microsoft YaHei UI', 9), anchor='e').pack(side='right')
-        return content  # 调用方在该容器内添加各步骤的具体控件。
+        # 尺寸变化时重新计算布局；焦点移动到屏幕外控件时自动滚动到该控件。
+        page.bind('<Configure>', self._schedule_page_layout)
+        self.page_canvas.bind('<Configure>', self._schedule_page_layout)
+        self.task_panel.bind('<Configure>', self._schedule_page_layout)
+        self.bind('<MouseWheel>', self._scroll_page, add='+')
+        for widget in (self.file_entry, self.file_button, self.browser_combo, self.open_button,
+                       self.import_radio, self.repair_radio, self.backup_checkbox, self.process_button):
+            widget.bind('<FocusIn>', lambda event: self.after_idle(self._ensure_widget_visible, event.widget), add='+')
+
+    def _section_heading(self, parent, title: str, icon: str, background: str):
+        # 作用：绘制带统一线条图标的区域标题。
+        # 使用场景：文档、浏览器、处理方式、进度和日志区域共用。
+        row = tk.Frame(parent, background=background)
+        row.pack(fill='x')
+        canvas = tk.Canvas(row, width=24, height=24, background=background, highlightthickness=0)
+        canvas.pack(side='left', padx=(0, 9))
+        self._draw_icon(canvas, icon)  # 使用本地矢量线条，无需额外图片文件。
+        tk.Label(row, text=title, background=background, foreground=UI_COLORS['text'],
+                 font=('Microsoft YaHei UI', 12, 'bold'), anchor='w').pack(side='left')
+
+    def _draw_icon(self, canvas: tk.Canvas, icon: str):
+        # 作用：使用相同颜色和线宽画出简洁的功能图标。
+        # 使用场景：创建区域标题时调用，不依赖外部字体或网络图标。
+        color = UI_COLORS['brand']
+        line = {'fill': color, 'width': 2, 'capstyle': 'round', 'joinstyle': 'round'}
+        if icon == 'document':
+            canvas.create_line(5, 2, 15, 2, 20, 7, 20, 22, 5, 22, 5, 2, **line)
+            canvas.create_line(15, 2, 15, 7, 20, 7, **line)
+            canvas.create_line(9, 12, 16, 12, **line)
+            canvas.create_line(9, 16, 16, 16, **line)
+        elif icon == 'browser':
+            canvas.create_rectangle(3, 3, 21, 17, outline=color, width=2)
+            canvas.create_line(12, 17, 12, 21, **line)
+            canvas.create_line(8, 21, 16, 21, **line)
+        elif icon == 'settings':
+            canvas.create_oval(7, 7, 17, 17, outline=color, width=2)
+            for x1, y1, x2, y2 in ((12, 2, 12, 5), (12, 19, 12, 22), (2, 12, 5, 12),
+                                   (19, 12, 22, 12), (5, 5, 7, 7), (17, 17, 19, 19),
+                                   (17, 7, 19, 5), (5, 19, 7, 17)):
+                canvas.create_line(x1, y1, x2, y2, **line)
+        elif icon == 'progress':
+            canvas.create_arc(3, 3, 21, 21, start=30, extent=135, style='arc', outline=color, width=2)
+            canvas.create_arc(3, 3, 21, 21, start=210, extent=135, style='arc', outline=color, width=2)
+            canvas.create_line(4, 6, 4, 10, 8, 10, **line)
+            canvas.create_line(20, 18, 20, 14, 16, 14, **line)
+        elif icon == 'log':
+            for y in (6, 12, 18):
+                canvas.create_oval(3, y - 1, 5, y + 1, outline=color, fill=color)
+                canvas.create_line(9, y, 21, y, **line)
+
+    def _description(self, parent, text: str, background: str, *, top: int = 3):
+        # 作用：用一致的字体和对比度显示操作说明。
+        # 使用场景：解释文件、浏览器或处理方式时调用。
+        label = tk.Label(parent, text=text, background=background, foreground=UI_COLORS['muted'],
+                         font=('Microsoft YaHei UI', 9), anchor='w', justify='left', wraplength=460)
+        label.pack(fill='x', pady=(top, 0))
+        label.bind('<Configure>', self._wrap_label_to_width)
+
+    def _wrap_label_to_width(self, event):
+        # 作用：让说明文字按控件实际宽度换行。
+        # 使用场景：小屏、极窄窗口或高缩放下避免文字被横向裁掉。
+        width = max(1, event.width - 2)
+        if int(event.widget.cget('wraplength')) != width:
+            event.widget.configure(wraplength=width)
+
+    def _divider(self, parent, background: str):
+        # 作用：在同一区域内用一条细线分隔不同操作。
+        # 使用场景：左侧步骤之间，以及右侧进度和日志之间。
+        line = tk.Frame(parent, height=1, background=UI_COLORS['border'])
+        line.pack(fill='x', pady=15)
+
+    def _schedule_page_layout(self, event=None):
+        # 作用：合并连续的尺寸变化，避免重复计算界面布局。
+        # 使用场景：用户调整窗口，或内容导致所需空间改变时调用。
+        if not self._page_layout_pending:
+            self._page_layout_pending = True
+            self.after_idle(self._update_page_layout)
+
+    def _update_page_layout(self):
+        # 作用：按可用宽度切换双栏或单栏，并在高度不足时启用页面滚动。
+        # 使用场景：窗口尺寸、系统缩放或屏幕可用空间发生变化时调用。
+        self._page_layout_pending = False
+        width, height = self.page_canvas.winfo_width(), self.page_canvas.winfo_height()
+        if width <= 1 or height <= 1:  # 窗口尚未完成尺寸计算时等待下一次配置事件。
+            return
+        form_width = self._horizontal_form_width()
+        needed_width = max(self.task_panel.winfo_reqwidth(), form_width + 42) + self.activity_panel.winfo_reqwidth() + 16
+        stacked = width < needed_width
+        if stacked != self._stacked_layout:
+            self._stacked_layout = stacked
+            if stacked:  # 窄屏时把进度区放到操作区下方，避免左右控件互相挤压。
+                self.page_content.grid_columnconfigure(0, weight=1)
+                self.page_content.grid_columnconfigure(1, weight=0)
+                self.page_content.grid_rowconfigure(0, weight=0)
+                self.page_content.grid_rowconfigure(1, weight=1)
+                self.task_panel.grid_configure(row=0, column=0, padx=0, pady=(0, 8))
+                self.activity_panel.grid_configure(row=1, column=0, padx=0, pady=(8, 0))
+            else:  # 空间足够时恢复用户选择的左右双栏方案。
+                self.page_content.grid_columnconfigure(0, weight=5)
+                self.page_content.grid_columnconfigure(1, weight=4)
+                self.page_content.grid_rowconfigure(0, weight=1)
+                self.page_content.grid_rowconfigure(1, weight=0)
+                self.task_panel.grid_configure(row=0, column=0, padx=(0, 8), pady=0)
+                self.activity_panel.grid_configure(row=0, column=1, padx=(8, 0), pady=0)
+
+        # 当单栏仍然很窄时，把输入框、按钮和选项从同行改为上下排列。
+        task_width = self.task_panel.winfo_width() - 42
+        if task_width > 1:
+            self._set_compact_form(task_width < form_width)
+
+        # 页面至少填满视口；内容更高时保留完整高度，让滚动条可以到达底部。
+        content_height = max(height, self.page_content.winfo_reqheight())
+        old_width = float(self.page_canvas.itemcget(self.page_window, 'width') or 0)
+        old_height = float(self.page_canvas.itemcget(self.page_window, 'height') or 0)
+        if old_width != width or old_height != content_height:
+            self.page_canvas.itemconfigure(self.page_window, width=width, height=content_height)
+        self.page_canvas.configure(scrollregion=(0, 0, width, content_height))
+        need_scroll = content_height > height
+        if need_scroll != self._page_scroll_visible:
+            self._page_scroll_visible = need_scroll
+            if need_scroll:
+                self.page_scrollbar.grid(row=0, column=1, sticky='ns')
+            else:
+                self.page_scrollbar.grid_remove()
+
+    def _horizontal_form_width(self):
+        # 作用：计算文档、浏览器和处理方式保持同行所需的最小宽度。
+        # 使用场景：布局变化时判断是否需要把控件改为上下排列。
+        file_width = self.file_button.winfo_reqwidth() + max(100, self.file_entry.winfo_reqheight() * 3) + 10
+        browser_width = self.browser_combo.winfo_reqwidth() + self.open_button.winfo_reqwidth() + 10
+        choices_width = self.import_radio.winfo_reqwidth() + self.repair_radio.winfo_reqwidth() + 22
+        return max(file_width, browser_width, choices_width)
+
+    def _set_compact_form(self, compact: bool):
+        # 作用：在同行和上下排列之间切换表单控件，不改变控件本身或其焦点顺序。
+        # 使用场景：窗口很窄时避免按钮、输入框和单选项被截断。
+        if compact == self._compact_form_layout:
+            return
+        self._compact_form_layout = compact
+        for widget in (self.file_entry, self.file_button, self.browser_combo, self.open_button,
+                       self.import_radio, self.repair_radio):
+            widget.pack_forget()
+        if compact:
+            self.file_entry.pack(fill='x')
+            self.file_button.pack(anchor='w', pady=(6, 0))
+            self.browser_combo.pack(fill='x')
+            self.open_button.pack(anchor='w', pady=(6, 0))
+            self.import_radio.pack(anchor='w')
+            self.repair_radio.pack(anchor='w', pady=(4, 0))
+        else:
+            self.file_button.pack(side='right', padx=(10, 0))
+            self.file_entry.pack(side='left', fill='x', expand=True)
+            self.open_button.pack(side='right', padx=(10, 0))
+            self.browser_combo.pack(side='left', fill='x', expand=True)
+            self.import_radio.pack(side='left', padx=(0, 22))
+            self.repair_radio.pack(side='left')
+
+    def _scroll_page(self, event):
+        # 作用：用鼠标滚轮滚动超出窗口的页面内容。
+        # 使用场景：小屏或高缩放时；鼠标在日志框上时保留日志自身的滚动。
+        if event.widget is self.log or not self._page_scroll_visible:
+            return None
+        if event.delta:
+            self.page_canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+            return 'break'
+        return None
+
+    def _ensure_widget_visible(self, widget):
+        # 作用：焦点移动到页面外的控件时，将该控件滚动到可见位置。
+        # 使用场景：键盘 Tab 在小窗口中依次访问文件、浏览器和处理按钮。
+        if not widget.winfo_exists() or not self._page_scroll_visible:
+            return
+        view_height = self.page_canvas.winfo_height()
+        widget_top = widget.winfo_rooty() - self.page_canvas.winfo_rooty()
+        widget_bottom = widget_top + widget.winfo_height()
+        current = self.page_canvas.canvasy(0)
+        if widget_top < 0:
+            target = current + widget_top - 8
+        elif widget_bottom > view_height:
+            target = current + widget_bottom - view_height + 8
+        else:
+            return
+        content_height = max(1, self.page_content.winfo_height())
+        self.page_canvas.yview_moveto(max(0, target) / content_height)
+
+    def _available_window_size(self):
+        # 作用：估算当前屏幕可容纳的窗口宽高，给标题栏和任务栏保留空间。
+        # 使用场景：启动时限制窗口尺寸；只读取屏幕尺寸，不读取屏幕内容。
+        return max(320, self.winfo_screenwidth() - 32), max(320, self.winfo_screenheight() - 100)
 
     def _fit_minimum_window(self):
-        # 作用：根据当前字体和系统缩放比例，计算能容纳控件的窗口最小尺寸。
-        # 使用场景：界面创建后调用，避免高缩放时按钮或日志区域被裁掉。
-        self.update_idletasks()  # 先让 Tk 计算所有控件需要的空间。
-        min_width = max(720, self.winfo_reqwidth())  # 至少容纳所有控件需要的宽度。
-        # 日志可以缩小，但至少保留 45 像素用于查看最近的处理信息。
-        min_height = max(620, self.winfo_reqheight() - self.log.winfo_reqheight() + 45)  # 为日志保留高度。
-        self.minsize(min_width, min_height)  # 用户缩放窗口时不能小于该尺寸。
-        self.geometry(f'{max(860, min_width)}x{max(760, min_height)}')  # 初始尺寸也不能小于最小尺寸。
+        # 作用：根据字体、缩放和屏幕空间设置启动尺寸与最小尺寸。
+        # 使用场景：创建界面后调用；空间不足时由页面滚动和单栏布局承接。
+        self.update_idletasks()
+        available_width, available_height = self._available_window_size()
+        requested_width = self.task_panel.winfo_reqwidth() + self.activity_panel.winfo_reqwidth() + 56
+        requested_height = self.header.winfo_reqheight() + max(self.task_panel.winfo_reqheight(),
+                                                               self.activity_panel.winfo_reqheight()) + 20
+        width = min(max(1060, requested_width), available_width)
+        height = min(max(720, requested_height), available_height)
+        self.minsize(min(880, available_width), min(620, available_height))
+        self.geometry(f'{width}x{height}')
 
     def append_log(self, message: str):
         # 作用：向只读日志区域追加消息并滚动到末尾。

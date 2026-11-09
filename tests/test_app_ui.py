@@ -5,6 +5,7 @@ from pathlib import Path
 import queue
 import tempfile
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -109,6 +110,37 @@ class AppUiTest(unittest.TestCase):
                      'progress_bar', 'log'):
             with self.subTest(widget=name):
                 self.assertTrue(getattr(self.window, name).winfo_ismapped())
+
+    def test_workflow_and_progress_are_in_separate_columns(self):
+        # 作用：检查操作区位于左侧，进度和日志位于右侧且都可见。
+        # 使用场景：重新调整布局时防止双栏重叠或被隐藏。
+        task = self.window.task_panel
+        activity = self.window.activity_panel
+        self.assertTrue(task.winfo_ismapped())
+        self.assertTrue(activity.winfo_ismapped())
+        self.assertLessEqual(task.winfo_rootx() + task.winfo_width(), activity.winfo_rootx())
+        self.assertGreaterEqual(self.window.log.winfo_rootx(), activity.winfo_rootx())
+        self.assertLess(self.window.process_button.winfo_rootx(), activity.winfo_rootx())
+
+    def test_keyboard_focus_follows_workflow(self):
+        # 作用：验证 Tab 按文档、浏览器、方式、备份和开始按钮的顺序移动。
+        # 使用场景：界面重新排列或改变控件创建顺序时执行。
+        names = ('file_entry', 'file_button', 'browser_combo', 'open_button', 'import_radio',
+                 'repair_radio', 'backup_checkbox', 'process_button')
+        for current, expected in zip(names, names[1:]):
+            with self.subTest(current=current):
+                self.assertEqual(getattr(self.window, current).tk_focusNext(), getattr(self.window, expected))
+
+    def test_long_progress_message_keeps_log_usable(self):
+        # 作用：长文件名不会把日志区域挤出窗口，完整信息仍留在日志中。
+        # 使用场景：上传的本地图片路径或名称很长时执行。
+        message = '正在上传 1/1：' + '较长的图片文件名' * 35 + '.png'
+        self.window.active_action = 'process'
+        self.window.events.put(('log', message))
+        self.drain_events()
+        self.assertIn(message, self.window.log.get('1.0', 'end'))
+        self.assertTrue(self.window.log.winfo_ismapped())
+        self.assertGreaterEqual(self.window.log.winfo_height(), 40)
 
     def test_file_selection_reports_image_count(self):
         # 作用：验证选择文件后路径更新，缺图信息显示在日志中。
@@ -312,6 +344,8 @@ class AppUiScalingTest(unittest.TestCase):
                                      'import_radio', 'repair_radio', 'backup_checkbox', 'process_button',
                                      'progress_bar', 'log'):
                             widget = getattr(window, name)
+                            window._ensure_widget_visible(widget)  # 小窗口允许滚动，但控件必须能到达。
+                            window.update()
                             x = widget.winfo_rootx() - window.winfo_rootx()
                             y = widget.winfo_rooty() - window.winfo_rooty()
                             with self.subTest(widget=name):
@@ -328,6 +362,79 @@ class AppUiScalingTest(unittest.TestCase):
                         widget = None  # 控件也会持有窗口；清除引用后由主线程回收。
                         window = None
                         gc.collect()
+
+    def test_small_screen_uses_stacked_layout_and_scrolls_to_controls(self):
+        # 作用：模拟较小可用屏幕，检查窗口适配、单栏回退和键盘焦点滚动。
+        # 使用场景：高系统缩放或笔记本屏幕较小时，仍能访问底部按钮及日志。
+        original = tk.Tk.__init__
+        with patch.object(app, 'BrowserWorker', DummyWorker), \
+                patch.object(tk.Tk, '__init__', hidden_tk_init(original, 2.0)), \
+                patch.object(app.Application, '_available_window_size', return_value=(700, 480)):
+            window = app.Application()
+            try:
+                window.deiconify()
+                window.update()
+                self.assertLessEqual(window.winfo_width(), 700)
+                self.assertLessEqual(window.winfo_height(), 480)
+                self.assertTrue(window._stacked_layout)
+                self.assertTrue(window._page_scroll_visible)
+                self.assertGreater(window.page_content.winfo_height(), window.page_canvas.winfo_height())
+                for widget in (window.process_button, window.log, window.file_entry):
+                    with self.subTest(widget=widget):
+                        window._ensure_widget_visible(widget)
+                        window.update()
+                        top = widget.winfo_rooty() - window.page_canvas.winfo_rooty()
+                        self.assertGreaterEqual(top, 0)
+                        self.assertLessEqual(top + widget.winfo_height(), window.page_canvas.winfo_height())
+                window.page_canvas.yview_moveto(0)
+                self.assertEqual(window._scroll_page(SimpleNamespace(widget=window.file_entry, delta=-120)), 'break')
+                self.assertGreater(window.page_canvas.yview()[0], 0)
+                self.assertIsNone(window._scroll_page(SimpleNamespace(widget=window.log, delta=-120)))
+                window.geometry('1100x800')  # 窗口变宽后应恢复用户选择的双栏布局。
+                window.update()
+                self.assertFalse(window._stacked_layout)
+                window.geometry('700x480')
+                window.update()
+                self.assertTrue(window._stacked_layout)
+            finally:
+                window.close_app()
+                widget = None
+                window = None
+                gc.collect()
+
+    def test_extremely_narrow_screen_wraps_text_and_stacks_form_controls(self):
+        # 作用：极窄屏幕下保留可读文字与完整按钮，不把单选项挤到屏幕外。
+        # 使用场景：高系统缩放导致可用窗口宽度降到 320 像素时执行。
+        original = tk.Tk.__init__
+        with patch.object(app, 'BrowserWorker', DummyWorker), \
+                patch.object(tk.Tk, '__init__', hidden_tk_init(original, 2.0)), \
+                patch.object(app.Application, '_available_window_size', return_value=(320, 480)):
+            window = app.Application()
+            try:
+                window.deiconify()
+                window.update()
+                self.assertTrue(window._stacked_layout)
+                self.assertTrue(window._compact_form_layout)
+                self.assertGreaterEqual(window.file_entry.winfo_width(), 100)
+                for name in ('file_button', 'open_button', 'import_radio', 'repair_radio',
+                             'backup_checkbox', 'process_button'):
+                    widget = getattr(window, name)
+                    with self.subTest(widget=name):
+                        self.assertGreaterEqual(widget.winfo_width(), widget.winfo_reqwidth())
+
+                def check_labels(parent):
+                    # 只检查控件尺寸，不读取或截取用户屏幕。
+                    if parent.winfo_class() == 'Label' and parent.winfo_ismapped():
+                        self.assertGreaterEqual(parent.winfo_width() + 4, parent.winfo_reqwidth())
+                    for child in parent.winfo_children():
+                        check_labels(child)
+
+                check_labels(window)
+            finally:
+                window.close_app()
+                widget = None
+                window = None
+                gc.collect()
 
 
 if __name__ == '__main__':

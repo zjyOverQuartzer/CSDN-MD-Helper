@@ -17,11 +17,11 @@ if not exist "build" mkdir "build"
 for /f %%V in ('call ".venv\Scripts\python.exe" -c "import sys; print(str(sys.version_info.major) + str(sys.version_info.minor))"') do set "CSDN_BUILD_PYTHON=%%V"
 if not defined CSDN_BUILD_PYTHON goto :failed
 echo Building the single-file application. Please wait...
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed --name CSDN-Markdown-Helper-v3 --distpath dist --workpath "build\pyinstaller-py%CSDN_BUILD_PYTHON%" --specpath build --paths . packaged_main.py
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed --name CSDN-Markdown-Helper-v4 --distpath dist --workpath "build\pyinstaller-py%CSDN_BUILD_PYTHON%" --specpath build --paths . packaged_main.py
 if errorlevel 1 goto :failed
 
 echo.
-echo Build complete: dist\CSDN-Markdown-Helper-v3.exe
+echo Build complete: dist\CSDN-Markdown-Helper-v4.exe
 echo Double-click the exe to start. Edge or Chrome must be installed.
 pause
 exit /b 0
