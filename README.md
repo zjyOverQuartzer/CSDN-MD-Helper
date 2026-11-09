@@ -4,7 +4,13 @@
 
 ## 启动
 
-双击 `启动助手.cmd`。本机需要 Python 3、Tkinter 和 Python 版 Playwright，以及已安装的 Edge 或 Chrome。Playwright 不需要下载浏览器：助手调用电脑上已安装的 Edge / Chrome。
+### 使用打包好的程序
+
+双击 `dist\CSDN-Markdown-Helper-v3.exe`。exe 内包含运行所需的 Python 和 Playwright 驱动，无需另行安装 Python 或 Playwright。电脑仍需安装 Microsoft Edge 或 Google Chrome；助手使用已安装的浏览器，不附带浏览器本体。
+
+### 从源码启动
+
+双击 `启动助手.cmd`。源码方式需要 Python 3、Tkinter 和 Python 版 Playwright，以及已安装的 Edge 或 Chrome。Playwright 不需要另外下载浏览器。
 
 如启动器提示缺少依赖，可在此目录新建独立虚拟环境安装（不修改全局 Python 环境）：
 
@@ -14,16 +20,21 @@ py -3 -m venv .venv
 .\.venv\Scripts\pythonw.exe app.py
 ```
 
+### 重新打包
+
+在 Windows 上双击 `打包助手.cmd`，脚本会使用项目的 `.venv` 安装 `requirements-build.txt` 中的打包依赖，并在 `dist` 目录生成 `CSDN-Markdown-Helper-v3.exe`。已有同名 exe 会被新版本覆盖；打包需要网络来安装缺失的依赖。生成的 exe 可以单独复制使用。
+
 ## 使用
 
 1. 选择一篇本地 `.md` 或 `.markdown` 文件。保留它与图片之间原有的相对目录关系。
 2. 选择 Edge 或 Chrome，点击“打开 CSDN”。浏览器使用助手自己的独立配置目录，首次请自行登录；不会读取现有浏览器的登录资料。
+   浏览器关闭后可以重新打开或选择另一种浏览器。若当前助手浏览器仍打开，切换时请先保存文章并确认关闭。
 3. 在助手打开的浏览器中打开或新建一篇 **Markdown 编辑器**文章，并关闭助手浏览器中其他 Markdown 编辑标签页。
 4. 回到助手，选择处理方式：
    - **导入所选 Markdown**：用所选本地文档替换正文。如果当前已有正文，工具会先询问。
    - **仅修复编辑器当前正文中的本地图片**：保留你在 CSDN 正文中已有的文字修改，只替换可识别的本地图片引用。
    - **处理前备份已有正文**：默认勾选，可自行取消；例如编辑器中只有 CSDN 示例文字时可以不备份。
-5. 点击“开始处理正文与图片”。处理期间不要编辑 CSDN 正文。
+5. 点击“开始处理正文与图片”。界面会显示已处理图片的进度；处理期间不要编辑 CSDN 正文。
 6. 完成后在 CSDN 中检查文章预览，自行保存草稿或发布。
 
 ## 工作方式与注意事项
