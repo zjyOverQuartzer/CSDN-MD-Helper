@@ -40,6 +40,18 @@ UI_COLORS = {
 }
 
 
+def enable_system_dpi_awareness():
+    # 作用：让 Windows 按系统显示缩放直接绘制界面，避免把低分辨率窗口当作图片放大。
+    # 使用场景：创建第一个 Tk 窗口前调用；打包版也在清单中声明相同设置。
+    if os.name != 'nt':  # 其他操作系统不提供此 Windows 接口。
+        return
+    try:
+        import ctypes
+        ctypes.windll.user32.SetProcessDPIAware()  # 若进程已由清单设置，Windows 会保留原设置。
+    except (AttributeError, OSError):
+        pass  # 系统不支持该接口时保留原有行为，不阻止程序启动。
+
+
 # 浏览器操作可能需要等待网络，放在后台线程中执行，避免 Tk 界面卡住。
 # commands 接收界面发出的任务，events 向界面发送日志、确认请求和处理结果。
 class BrowserWorker(threading.Thread):
@@ -251,10 +263,13 @@ class Application(tk.Tk):
     def __init__(self):
         # 作用：初始化窗口、界面状态、消息队列和后台工作线程。
         # 使用场景：创建 Application 实例时自动调用。
+        enable_system_dpi_awareness()  # 必须在创建 Tk 窗口之前设置 Windows 的 DPI 感知。
         super().__init__()  # 初始化 Tk 主窗口。
+        # Tk 会按系统 DPI 缩放以磅为单位的字体；像素尺寸另按比例计算。
+        self.ui_scale = max(1.0, self.winfo_fpixels('1i') / 96.0)
         self.title(APP_NAME)  # 设置窗口标题。
-        self.geometry('1060x720')  # 为并排的操作区和进度区预留初始空间。
-        self.minsize(880, 620)  # 防止窗口缩得过小而无法使用。
+        self.geometry(f'{self._dpi_pixels(1060)}x{self._dpi_pixels(720)}')  # 保留高缩放下原有的窗口大小。
+        self.minsize(self._dpi_pixels(880), self._dpi_pixels(620))  # 后续会根据可用屏幕空间再次限制。
         self.configure(background=UI_COLORS['page'])  # 统一窗口的浅色背景。
         # Tk 控件只由主线程更新，两个队列负责与浏览器后台线程传递消息。
         self.commands: queue.Queue = queue.Queue()
@@ -454,7 +469,8 @@ class Application(tk.Tk):
         # 使用场景：文档、浏览器、处理方式、进度和日志区域共用。
         row = tk.Frame(parent, background=background)
         row.pack(fill='x')
-        canvas = tk.Canvas(row, width=24, height=24, background=background, highlightthickness=0)
+        canvas = tk.Canvas(row, width=self._dpi_pixels(24), height=self._dpi_pixels(24),
+                           background=background, highlightthickness=0)
         canvas.pack(side='left', padx=(0, 9))
         self._draw_icon(canvas, icon)  # 使用本地矢量线条，无需额外图片文件。
         tk.Label(row, text=title, background=background, foreground=UI_COLORS['text'],
@@ -464,31 +480,33 @@ class Application(tk.Tk):
         # 作用：使用相同颜色和线宽画出简洁的功能图标。
         # 使用场景：创建区域标题时调用，不依赖外部字体或网络图标。
         color = UI_COLORS['brand']
-        line = {'fill': color, 'width': 2, 'capstyle': 'round', 'joinstyle': 'round'}
+        stroke = self._dpi_pixels(2)  # 图标线宽随 DPI 变化，避免高缩放时显得过细。
+        line = {'fill': color, 'width': stroke, 'capstyle': 'round', 'joinstyle': 'round'}
         if icon == 'document':
             canvas.create_line(5, 2, 15, 2, 20, 7, 20, 22, 5, 22, 5, 2, **line)
             canvas.create_line(15, 2, 15, 7, 20, 7, **line)
             canvas.create_line(9, 12, 16, 12, **line)
             canvas.create_line(9, 16, 16, 16, **line)
         elif icon == 'browser':
-            canvas.create_rectangle(3, 3, 21, 17, outline=color, width=2)
+            canvas.create_rectangle(3, 3, 21, 17, outline=color, width=stroke)
             canvas.create_line(12, 17, 12, 21, **line)
             canvas.create_line(8, 21, 16, 21, **line)
         elif icon == 'settings':
-            canvas.create_oval(7, 7, 17, 17, outline=color, width=2)
+            canvas.create_oval(7, 7, 17, 17, outline=color, width=stroke)
             for x1, y1, x2, y2 in ((12, 2, 12, 5), (12, 19, 12, 22), (2, 12, 5, 12),
                                    (19, 12, 22, 12), (5, 5, 7, 7), (17, 17, 19, 19),
                                    (17, 7, 19, 5), (5, 19, 7, 17)):
                 canvas.create_line(x1, y1, x2, y2, **line)
         elif icon == 'progress':
-            canvas.create_arc(3, 3, 21, 21, start=30, extent=135, style='arc', outline=color, width=2)
-            canvas.create_arc(3, 3, 21, 21, start=210, extent=135, style='arc', outline=color, width=2)
+            canvas.create_arc(3, 3, 21, 21, start=30, extent=135, style='arc', outline=color, width=stroke)
+            canvas.create_arc(3, 3, 21, 21, start=210, extent=135, style='arc', outline=color, width=stroke)
             canvas.create_line(4, 6, 4, 10, 8, 10, **line)
             canvas.create_line(20, 18, 20, 14, 16, 14, **line)
         elif icon == 'log':
             for y in (6, 12, 18):
                 canvas.create_oval(3, y - 1, 5, y + 1, outline=color, fill=color)
                 canvas.create_line(9, y, 21, y, **line)
+        canvas.scale('all', 0, 0, self.ui_scale, self.ui_scale)  # 放大矢量坐标，而不是放大已绘制的位图。
 
     def _description(self, parent, text: str, background: str, *, top: int = 3):
         # 作用：用一致的字体和对比度显示操作说明。
@@ -625,22 +643,28 @@ class Application(tk.Tk):
         content_height = max(1, self.page_content.winfo_height())
         self.page_canvas.yview_moveto(max(0, target) / content_height)
 
+    def _dpi_pixels(self, value: int) -> int:
+        # 作用：将基于 96 DPI 设计的像素尺寸换算成当前系统 DPI 的尺寸。
+        # 使用场景：计算窗口、图标及屏幕边距，保持高缩放下与旧版相近的可见大小。
+        return max(1, round(value * self.ui_scale))
+
     def _available_window_size(self):
         # 作用：估算当前屏幕可容纳的窗口宽高，给标题栏和任务栏保留空间。
         # 使用场景：启动时限制窗口尺寸；只读取屏幕尺寸，不读取屏幕内容。
-        return max(320, self.winfo_screenwidth() - 32), max(320, self.winfo_screenheight() - 100)
+        return (max(320, self.winfo_screenwidth() - self._dpi_pixels(32)),
+                max(320, self.winfo_screenheight() - self._dpi_pixels(100)))
 
     def _fit_minimum_window(self):
         # 作用：根据字体、缩放和屏幕空间设置启动尺寸与最小尺寸。
         # 使用场景：创建界面后调用；空间不足时由页面滚动和单栏布局承接。
         self.update_idletasks()
         available_width, available_height = self._available_window_size()
-        requested_width = self.task_panel.winfo_reqwidth() + self.activity_panel.winfo_reqwidth() + 56
+        requested_width = self.task_panel.winfo_reqwidth() + self.activity_panel.winfo_reqwidth() + self._dpi_pixels(56)
         requested_height = self.header.winfo_reqheight() + max(self.task_panel.winfo_reqheight(),
-                                                               self.activity_panel.winfo_reqheight()) + 20
-        width = min(max(1060, requested_width), available_width)
-        height = min(max(720, requested_height), available_height)
-        self.minsize(min(880, available_width), min(620, available_height))
+                                                               self.activity_panel.winfo_reqheight()) + self._dpi_pixels(20)
+        width = min(max(self._dpi_pixels(1060), requested_width), available_width)
+        height = min(max(self._dpi_pixels(720), requested_height), available_height)
+        self.minsize(min(self._dpi_pixels(880), available_width), min(self._dpi_pixels(620), available_height))
         self.geometry(f'{width}x{height}')
 
     def append_log(self, message: str):

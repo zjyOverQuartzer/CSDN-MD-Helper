@@ -6,7 +6,7 @@
 
 ### 使用打包好的程序
 
-双击 `dist\CSDN-Markdown-Helper-v4.exe`。exe 内包含运行所需的 Python 和 Playwright 驱动，无需另行安装 Python 或 Playwright。电脑仍需安装 Microsoft Edge 或 Google Chrome；助手使用已安装的浏览器，不附带浏览器本体。
+双击 `dist\CSDN-Markdown-Helper-v5.exe`。exe 内包含运行所需的 Python 和 Playwright 驱动，无需另行安装 Python 或 Playwright。电脑仍需安装 Microsoft Edge 或 Google Chrome；助手使用已安装的浏览器，不附带浏览器本体。
 
 ### 从源码启动
 
@@ -22,11 +22,13 @@ py -3 -m venv .venv
 
 ### 重新打包
 
-在 Windows 上双击 `打包助手.cmd`，脚本会使用项目的 `.venv` 安装 `requirements-build.txt` 中的打包依赖，并在 `dist` 目录生成 `CSDN-Markdown-Helper-v4.exe`。已有同名 exe 会被新版本覆盖；打包需要网络来安装缺失的依赖。生成的 exe 可以单独复制使用。
+在 Windows 上双击 `打包助手.cmd`，脚本会使用项目的 `.venv` 安装 `requirements-build.txt` 中的打包依赖，并在 `dist` 目录生成 `CSDN-Markdown-Helper-v5.exe`。已有同名 exe 会被新版本覆盖；打包需要网络来安装缺失的依赖。生成的 exe 可以单独复制使用。
 
 ## 使用
 
 界面左侧用于选择文档、打开浏览器和选择处理方式；右侧显示进度和处理日志。窗口较窄时会自动改为上下布局，内容超出窗口时可用滚动条或鼠标滚轮查看。
+
+程序启动时按 Windows 的系统 DPI 绘制，并按缩放比例调整默认窗口和图标大小。使用缩放比例不同的多个显示器时，窗口移到另一块屏幕后仍可能被 Windows 缩放；目前不支持跨屏动态调整 DPI。
 
 1. 选择一篇本地 `.md` 或 `.markdown` 文件。保留它与图片之间原有的相对目录关系。
 2. 选择 Edge 或 Chrome，点击“打开 CSDN”。浏览器使用助手自己的独立配置目录，首次请自行登录；不会读取现有浏览器的登录资料。

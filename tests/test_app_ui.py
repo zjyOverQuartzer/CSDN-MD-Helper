@@ -1,6 +1,7 @@
 """验证桌面界面的布局、交互及进度显示，不访问真实 CSDN。"""
 
 import gc
+import os
 from pathlib import Path
 import queue
 import tempfile
@@ -110,6 +111,25 @@ class AppUiTest(unittest.TestCase):
                      'progress_bar', 'log'):
             with self.subTest(widget=name):
                 self.assertTrue(getattr(self.window, name).winfo_ismapped())
+
+    @unittest.skipUnless(os.name == 'nt', '仅在 Windows 上检查 DPI 感知')
+    def test_window_uses_system_dpi_instead_of_bitmap_scaling(self):
+        # 作用：验证实际窗口具有 DPI 感知，并且 Tk 使用窗口的 DPI 计算字体大小。
+        # 使用场景：源码和打包版运行界面测试时，防止重新退回 96 DPI 位图放大。
+        import ctypes
+        from ctypes import wintypes
+        shcore = ctypes.WinDLL('shcore', use_last_error=True)
+        shcore.GetProcessDpiAwareness.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_int)]
+        shcore.GetProcessDpiAwareness.restype = ctypes.c_long
+        awareness = ctypes.c_int(-1)
+        self.assertEqual(shcore.GetProcessDpiAwareness(None, ctypes.byref(awareness)), 0)
+        self.assertIn(awareness.value, (1, 2))  # 允许系统感知或调用方已经启用的逐屏感知。
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+        user32.GetDpiForWindow.restype = wintypes.UINT
+        dpi = user32.GetDpiForWindow(self.window.winfo_id())
+        self.assertGreater(dpi, 0)
+        self.assertAlmostEqual(self.window.winfo_fpixels('1i'), dpi, delta=2)
 
     def test_workflow_and_progress_are_in_separate_columns(self):
         # 作用：检查操作区位于左侧，进度和日志位于右侧且都可见。
@@ -324,6 +344,45 @@ class AppUiTest(unittest.TestCase):
 class AppUiScalingTest(unittest.TestCase):
     # 作用：验证不同系统缩放比例下关键控件不会被裁掉。
     # 使用场景：修改字体、间距或窗口最小尺寸后执行。
+    def test_default_window_and_icons_follow_dpi_scaling(self):
+        # 作用：验证 DPI 提高后默认窗口和线条图标按比例增大。
+        # 使用场景：避免启用高 DPI 后字体清晰了，但窗口和图标反而明显变小。
+        sizes = []
+        for scale in (4 / 3, 2.0):  # 分别模拟 Tk 在 100% 和 150% 显示缩放时的比例。
+            original = tk.Tk.__init__
+            with patch.object(app, 'BrowserWorker', DummyWorker), \
+                    patch.object(tk.Tk, '__init__', hidden_tk_init(original, scale)), \
+                    patch.object(app.Application, '_available_window_size', return_value=(4000, 3000)):
+                window = app.Application()
+                try:
+                    window.deiconify()
+                    window.update()
+                    def find_icon(parent):
+                        # 递归找到操作面板中的实际图标画布，而不是只检查换算函数的返回值。
+                        for child in parent.winfo_children():
+                            if isinstance(child, tk.Canvas):
+                                return child
+                            found = find_icon(child)
+                            if found is not None:
+                                return found
+                        return None
+                    icon = find_icon(window.task_panel)
+                    self.assertIsNotNone(icon)
+                    bounds = icon.bbox('all')
+                    self.assertIsNotNone(bounds)
+                    sizes.append((window.winfo_width(), icon.winfo_width(),
+                                  bounds[2] - bounds[0], window.ui_scale))
+                finally:
+                    window.close_app()
+                    icon = None
+                    window = None
+                    gc.collect()
+        self.assertAlmostEqual(sizes[0][3], 1.0, delta=0.02)
+        self.assertAlmostEqual(sizes[1][3], 1.5, delta=0.02)
+        self.assertGreater(sizes[1][0], sizes[0][0] * 1.4)
+        self.assertGreater(sizes[1][1], sizes[0][1] * 1.4)
+        self.assertGreater(sizes[1][2], sizes[0][2] * 1.3)
+
     def test_minimum_size_keeps_controls_inside_window(self):
         # 作用：在普通和较高字体缩放比例下检查最小窗口布局。
         # 使用场景：验证小窗口中仍能操作按钮并查看日志。
