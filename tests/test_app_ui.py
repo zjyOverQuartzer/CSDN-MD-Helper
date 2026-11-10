@@ -6,6 +6,7 @@ from pathlib import Path
 import queue
 import tempfile
 import tkinter as tk
+from tkinter import ttk
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -111,6 +112,42 @@ class AppUiTest(unittest.TestCase):
                      'progress_bar', 'log'):
             with self.subTest(widget=name):
                 self.assertTrue(getattr(self.window, name).winfo_ismapped())
+
+    @unittest.skipUnless(os.name == 'nt', '仅在 Windows 上检查原生选择标记')
+    def test_choice_indicators_are_larger_and_keep_selection_behavior(self):
+        # 作用：验证 Windows 原生单选和对号标记的尺寸、选中和禁用行为。
+        # 使用场景：调整选择控件外观后，防止标记变小或破坏用户的操作。
+        style = ttk.Style(self.window)
+        if 'vista' not in style.theme_names():
+            self.skipTest('Windows 原生主题不可用')
+        self.assertIn('CsdnRadio.indicator', str(style.layout('Choice.TRadiobutton')))
+        self.assertIn('CsdnCheck.indicator', str(style.layout('Choice.TCheckbutton')))
+        for widget in (self.window.import_radio, self.window.repair_radio, self.window.backup_checkbox):
+            with self.subTest(widget=widget):
+                # 使用 Tk 的元素命中结果检查控件自身大小，不读取或截取用户屏幕。
+                points = [(x, y) for y in range(widget.winfo_height())
+                          for x in range(min(widget.winfo_width(), 100))
+                          if 'indicator' in widget.identify(x, y).lower()]
+                self.assertTrue(points)
+                width = max(x for x, _ in points) - min(x for x, _ in points) + 1
+                height = max(y for _, y in points) - min(y for _, y in points) + 1
+                self.assertGreaterEqual(width, self.window._dpi_pixels(12))
+                self.assertGreaterEqual(height, self.window._dpi_pixels(11))
+
+        self.assertTrue(self.window.import_radio.instate(('selected',)))
+        self.window.repair_radio.invoke()
+        self.assertEqual(self.window.mode.get(), 'repair')
+        self.assertTrue(self.window.repair_radio.instate(('selected',)))
+        self.assertFalse(self.window.import_radio.instate(('selected',)))
+        self.assertTrue(self.window.backup_existing.get())
+        self.window.backup_checkbox.invoke()
+        self.assertFalse(self.window.backup_existing.get())
+        self.window.set_busy(True)
+        self.window.backup_checkbox.invoke()
+        self.assertFalse(self.window.backup_existing.get())  # 禁用时点击不会改变选项。
+        self.window.set_busy(False)
+        self.window.backup_checkbox.invoke()
+        self.assertTrue(self.window.backup_existing.get())
 
     @unittest.skipUnless(os.name == 'nt', '仅在 Windows 上检查 DPI 感知')
     def test_window_uses_system_dpi_instead_of_bitmap_scaling(self):

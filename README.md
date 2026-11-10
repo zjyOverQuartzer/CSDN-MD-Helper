@@ -6,7 +6,7 @@
 
 ### 使用打包好的程序
 
-双击 `dist\CSDN-Markdown-Helper-v5.exe`。exe 内包含运行所需的 Python 和 Playwright 驱动，无需另行安装 Python 或 Playwright。电脑仍需安装 Microsoft Edge 或 Google Chrome；助手使用已安装的浏览器，不附带浏览器本体。
+双击 `dist\CSDN-Markdown-Helper-v6.exe`。exe 内包含运行所需的 Python 和 Playwright 驱动，无需另行安装 Python 或 Playwright。电脑仍需安装 Microsoft Edge 或 Google Chrome；助手使用已安装的浏览器，不附带浏览器本体。
 
 ### 从源码启动
 
@@ -22,7 +22,7 @@ py -3 -m venv .venv
 
 ### 重新打包
 
-在 Windows 上双击 `打包助手.cmd`，脚本会使用项目的 `.venv` 安装 `requirements-build.txt` 中的打包依赖，并在 `dist` 目录生成 `CSDN-Markdown-Helper-v5.exe`。已有同名 exe 会被新版本覆盖；打包需要网络来安装缺失的依赖。生成的 exe 可以单独复制使用。
+在 Windows 上双击 `打包助手.cmd`，脚本会使用项目的 `.venv` 安装 `requirements-build.txt` 中的打包依赖，并在 `dist` 目录生成 `CSDN-Markdown-Helper-v6.exe`。已有同名 exe 会被新版本覆盖；打包需要网络来安装缺失的依赖。生成的 exe 可以单独复制使用。
 
 ## 使用
 

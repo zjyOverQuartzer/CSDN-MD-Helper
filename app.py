@@ -327,13 +327,12 @@ class Application(tk.Tk):
         style.map('Form.TCombobox', fieldbackground=[('readonly', colors['field']), ('disabled', '#EDEBEA')],
                   foreground=[('disabled', '#797979')], bordercolor=[('focus', colors['brand'])])
         style.configure('Choice.TRadiobutton', background=colors['surface'], foreground=colors['text'],
-                        font=('Microsoft YaHei UI', 10), padding=(0, 2))
-        style.map('Choice.TRadiobutton', background=[('active', colors['surface'])],
-                  indicatorcolor=[('selected', colors['brand'])])
+                        font=('Microsoft YaHei UI', 10), padding=(0, 4))
+        style.map('Choice.TRadiobutton', background=[('active', colors['surface'])])
         style.configure('Choice.TCheckbutton', background=colors['surface'], foreground=colors['text'],
-                        font=('Microsoft YaHei UI', 10), padding=(0, 2))
-        style.map('Choice.TCheckbutton', background=[('active', colors['surface'])],
-                  indicatorcolor=[('selected', colors['brand'])])
+                        font=('Microsoft YaHei UI', 10), padding=(0, 4))
+        style.map('Choice.TCheckbutton', background=[('active', colors['surface'])])
+        self._configure_choice_indicators(style)  # 圆点和对号使用更清楚的系统标记。
         style.configure('Upload.Horizontal.TProgressbar', troughcolor=colors['track'],
                         background=colors['brand'], bordercolor=colors['track'],
                         lightcolor=colors['brand'], darkcolor=colors['brand'], thickness=9)
@@ -463,6 +462,30 @@ class Application(tk.Tk):
         for widget in (self.file_entry, self.file_button, self.browser_combo, self.open_button,
                        self.import_radio, self.repair_radio, self.backup_checkbox, self.process_button):
             widget.bind('<FocusIn>', lambda event: self.after_idle(self._ensure_widget_visible, event.widget), add='+')
+
+    def _configure_choice_indicators(self, style: ttk.Style):
+        # 作用：使用较大的 Windows 原生单选圆点与带对号的复选框。
+        # 使用场景：构建处理方式和备份选项时调用，保留 ttk 自带的键盘及选中状态。
+        if 'vista' in style.theme_names():  # Windows 主题会按系统 DPI 绘制原生标记。
+            try:
+                style.element_create('CsdnRadio.indicator', 'from', 'vista', 'Radiobutton.indicator')
+                style.element_create('CsdnCheck.indicator', 'from', 'vista', 'Checkbutton.indicator')
+                style.layout('Choice.TRadiobutton', [
+                    ('Radiobutton.padding', {'sticky': 'nswe', 'children': [
+                        ('CsdnRadio.indicator', {'side': 'left', 'sticky': ''}),
+                        ('Radiobutton.focus', {'side': 'left', 'sticky': '', 'children': [
+                            ('Radiobutton.label', {'sticky': 'nswe'})]})]})])
+                style.layout('Choice.TCheckbutton', [
+                    ('Checkbutton.padding', {'sticky': 'nswe', 'children': [
+                        ('CsdnCheck.indicator', {'side': 'left', 'sticky': ''}),
+                        ('Checkbutton.focus', {'side': 'left', 'sticky': 'w', 'children': [
+                            ('Checkbutton.label', {'sticky': 'nswe'})]})]})])
+                return
+            except tk.TclError:
+                pass  # 系统主题不可用时回退到已安装的 Tk 主题。
+        # 非 Windows 或系统主题不可用时，至少放大 Tk 默认标记。
+        style.configure('Choice.TRadiobutton', indicatorsize=self._dpi_pixels(18))
+        style.configure('Choice.TCheckbutton', indicatorsize=self._dpi_pixels(18))
 
     def _section_heading(self, parent, title: str, icon: str, background: str):
         # 作用：绘制带统一线条图标的区域标题。
