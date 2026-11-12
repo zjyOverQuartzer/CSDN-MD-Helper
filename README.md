@@ -57,3 +57,9 @@ py -3 -m venv .venv
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+## 版权与许可证
+
+Copyright (c) 2026 zhangjiayu (GitHub: zjyOverQuartzer)
+
+本项目原创代码按 GNU General Public License v3.0 only（GPL-3.0-only）授权，完整条款见 [LICENSE](LICENSE)。第三方组件遵循其各自的许可证。
