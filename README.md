@@ -6,11 +6,13 @@
 
 ### 使用打包好的程序
 
-双击 `dist\CSDN-Markdown-Helper-v6.exe`。exe 内包含运行所需的 Python 和 Playwright 驱动，无需另行安装 Python 或 Playwright。电脑仍需安装 Microsoft Edge 或 Google Chrome；助手使用已安装的浏览器，不附带浏览器本体。
+前往 [GitHub Releases](https://github.com/zjyOverQuartzer/CSDN-MD-Helper/releases)，在版本的 **Assets** 中下载 `CSDN-Markdown-Helper.exe` 并双击运行；如果该版本还提供发行压缩包，也可以下载并解压压缩包后运行其中的 exe。`Source code` 是源码，不是直接运行的程序。
+
+exe 内包含运行所需的 Python、Markdown 解析器和 Playwright 驱动，无需另行安装 Python 或 Playwright。电脑仍需安装 Microsoft Edge 或 Google Chrome；助手使用已安装的浏览器，不附带浏览器本体。
 
 ### 从源码启动
 
-双击 `启动助手.cmd`。源码方式需要 Python 3、Tkinter 和 Python 版 Playwright，以及已安装的 Edge 或 Chrome。Playwright 不需要另外下载浏览器。
+双击 `启动助手.cmd`。源码方式需要 Python 3.10 或更新版本、Tkinter 和 `requirements.txt` 中的依赖，以及已安装的 Edge 或 Chrome。Playwright 不需要另外下载浏览器。
 
 如启动器提示缺少依赖，可在此目录新建独立虚拟环境安装（不修改全局 Python 环境）：
 
@@ -22,7 +24,9 @@ py -3 -m venv .venv
 
 ### 重新打包
 
-在 Windows 上双击 `打包助手.cmd`，脚本会使用项目的 `.venv` 安装 `requirements-build.txt` 中的打包依赖，并在 `dist` 目录生成 `CSDN-Markdown-Helper-v6.exe`。已有同名 exe 会被新版本覆盖；打包需要网络来安装缺失的依赖。生成的 exe 可以单独复制使用。
+在 Windows x64 上双击 `打包助手.cmd`。脚本会在项目的 `build\release-env` 创建独立构建环境，安装 `requirements-build.txt` 中的依赖，并在 `dist\v0.2.0` 生成 `CSDN-Markdown-Helper.exe` 和包含对应源码、许可证的发行压缩包。目标目录已存在时会使用新的编号目录，不覆盖已有文件；安装缺失依赖需要网络。
+
+压缩包中的 `BUILD_INFO.json` 记录构建版本与文件摘要，`third_party_licenses/` 整理已收集的第三方许可证。发行前仍应在干净 Windows 环境测试，并核对 [第三方组件说明](THIRD_PARTY_NOTICES.md)。旧版 `v0.1.0` 的源码快照早于本项目添加 `LICENSE`；新发行版应使用包含许可证的源码版本。
 
 ## 使用
 
@@ -65,4 +69,4 @@ python -m unittest discover -s tests -v
 
 Copyright (c) 2026 zhangjiayu (GitHub: zjyOverQuartzer)
 
-本项目原创代码按 GNU General Public License v3.0 only（GPL-3.0-only）授权，完整条款见 [LICENSE](LICENSE)。第三方组件遵循其各自的许可证。
+本项目原创代码按 GNU General Public License v3.0 only（GPL-3.0-only）授权，完整条款见 [LICENSE](LICENSE)。第三方组件遵循其各自的许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
