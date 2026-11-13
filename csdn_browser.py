@@ -7,6 +7,8 @@ import base64  # 将本地图片字节编码后传入浏览器页面。
 from collections import deque  # 按顺序缓存页面收到的网络响应。
 from dataclasses import dataclass  # 定义结构化的处理结果。
 from datetime import datetime  # 为正文备份生成时间标识。
+from email import policy  # 按标准解析 multipart 表单中的文件字段。
+from email.parser import BytesParser  # 从请求字节中提取每个表单部分。
 import mimetypes  # 根据图片扩展名推测文件类型。
 from pathlib import Path  # 表示文档、图片和备份路径。
 import time  # 使用单调时钟计算等待时长。
@@ -28,6 +30,12 @@ ALLOWED_IMAGE_HOSTS = {'i-blog.csdnimg.cn', 'img-blog.csdnimg.cn'}  # 允许写�
 class HelperError(Exception):
     # 作用：表示可以直接展示给用户的处理错误。
     # 使用场景：图片缺失、编辑器不可用或保护机制中止时抛出。
+    pass
+
+
+class ProcessingCancelled(HelperError):
+    # 作用：区分用户主动停止与上传错误。
+    # 使用场景：在正文安全检查点收到停止请求时抛出，由界面显示停止结果。
     pass
 
 
@@ -137,16 +145,16 @@ def _protect_local_images(body: str, markdown_path: Path) -> str:
 
 
 def _response_may_contain_upload(response, extra_hosts: set[str]) -> bool:
-    # 作用：筛选可信域名返回的成功 POST 响应。
+    # 作用：筛选可信域名返回的 POST 响应，包括失败状态。
     # 使用场景：等待上传结果时调用；extra_hosts 用于允许本地测试地址。
-    # 仅从可信域名的成功 POST 响应中寻找图片；extra_hosts 供本地测试使用。
+    # 先检查来源；状态和请求是否属于当前图片由调用方继续判断。
     try:
         host = (urlsplit(response.url).hostname or '').lower()  # 规范化响应域名便于比较。
         # CSDN 上传可能经过 CSDN 域名、图片域名或华为云域名。
         trusted = (host in extra_hosts or host == 'csdn.net' or host.endswith('.csdn.net')
                    or host == 'csdnimg.cn' or host.endswith('.csdnimg.cn')
                    or host == 'myhuaweicloud.com' or host.endswith('.myhuaweicloud.com'))
-        return trusted and response.request.method == 'POST' and response.ok  # 域名、方法、状态都要满足。
+        return trusted and response.request.method == 'POST'  # 失败响应也需要交给后续图片匹配判断。
     except Exception:
         return False  # 响应不可读取时按不可信处理。
 
@@ -175,6 +183,70 @@ def _from_response(response) -> str | None:
         return _valid_image_url(data.get('imageUrl')) if isinstance(data, dict) else None  # 继续校验地址。
     except Exception:
         return None  # JSON 解析失败或响应不可读取时忽略该响应。
+
+
+def _request_contains_image(request, path: Path) -> bool:
+    # 作用：保守判断失败请求是否包含本轮上传的图片字节。
+    # 使用场景：只对可关联的失败响应报告 HTTP 状态，避免误判页面其他请求。
+    try:
+        content_type = request.headers.get('content-type', '')
+        media_type = content_type.split(';', 1)[0].strip().lower()
+        body = request.post_data_buffer
+        data = path.read_bytes()
+        if not body or not data:
+            return False  # 无法读取请求体时不能确认归属。
+        if media_type.startswith('image/') or media_type == 'application/octet-stream':
+            return body == data  # 直接上传时，完整请求体必须等于图片内容。
+        if media_type == 'multipart/form-data':
+            # 保留 boundary 原始大小写，并仅检查文件字段，不能把普通文本字段误认作图片。
+            header = b'MIME-Version: 1.0\r\nContent-Type: ' + content_type.encode('ascii') + b'\r\n\r\n'
+            message = BytesParser(policy=policy.default).parsebytes(header + body)
+            return message.is_multipart() and any(
+                part.get_filename() is not None and part.get_payload(decode=True) == data
+                for part in message.iter_parts()
+            )
+        return False
+    except Exception:
+        return False  # 浏览器无法提供请求体时不猜测归属。
+
+
+def _request_may_contain_image(request, path: Path) -> bool:
+    # 作用：保守识别图片或表单类型的可能上传请求，但不把它当成确定证据。
+    # 使用场景：浏览器对 File/Blob 不暴露请求体时，记录可能相关的失败状态。
+    try:
+        content_type = request.headers.get('content-type', '').lower().split(';', 1)[0].strip()
+        mime = (mimetypes.guess_type(path.name)[0] or '').lower()
+        return ((bool(mime) and content_type == mime and content_type.startswith('image/'))
+                or content_type == 'multipart/form-data')
+    except Exception:
+        return False
+
+
+def _http_upload_error(status: int, path: Path) -> str:
+    # 作用：为已确认属于当前图片的 HTTP 失败生成不含敏感响应体的提示。
+    # 使用场景：上传接口返回错误状态时，告诉用户下一步检查什么。
+    if status in (401, 403):
+        detail = '可能登录过期或账号没有上传权限，请检查 CSDN 登录状态。'
+    elif status == 413:
+        detail = '服务可能认为图片过大，请压缩图片后重试。'
+    elif status == 429:
+        detail = '上传可能过于频繁，请稍后重试。'
+    elif status >= 500:
+        detail = '上传服务暂时不可用，请稍后重试。'
+    else:
+        detail = '上传服务拒绝了该图片，请检查文件和网络后重试。'
+    return f'图片上传失败（HTTP {status}）：{path.name}。{detail}'
+
+
+def _check_cancelled(cancel_event, completed: int, total: int, *, before_write: bool = False) -> None:
+    # 作用：在安全检查点响应停止请求，说明已处理数量和后续操作。
+    # 使用场景：写入前或某张图片已替换完成后调用，不打断进行中的上传。
+    if cancel_event is None or not cancel_event.is_set():
+        return
+    if before_write:
+        raise ProcessingCancelled('已停止：尚未修改正文或上传图片。')
+    raise ProcessingCancelled(f'已安全停止，已完成 {completed}/{total} 张图片。\n'
+                              '请检查当前正文；可选择“仅修复图片”继续处理剩余图片。')
 
 
 def _paste_file(page, path: Path) -> None:
@@ -394,7 +466,7 @@ def _write_verified(page, text: str, previous: str, backup_path: Path | None) ->
 
 
 def upload_one(page, path: Path, pending: deque, current_requests: set, *, timeout_ms: int = 60_000,
-               extra_hosts: set[str] | None = None) -> str:
+               extra_hosts: set[str] | None = None, notify=lambda message: None) -> str:
     # 作用：上传一张本地图片并获取已插入正文的 CSDN 地址。
     # 使用场景：逐张处理图片时调用；pending 与 current_requests 由网络监听器维护。
     # 清空上一张图的请求记录，粘贴文件后等待本次可信上传响应。
@@ -404,11 +476,20 @@ def upload_one(page, path: Path, pending: deque, current_requests: set, *, timeo
     current_requests.clear()  # 丢弃上一张图片的请求记录。
     _paste_file(page, path)  # 由 CSDN 编辑器接管文件粘贴并发起上传。
     deadline = time.monotonic() + timeout_ms / 1000  # 计算本轮等待上传响应的截止时间。
+    possible_failure = None  # 请求体不可见时只能提示可能相关，不能提前中断其他上传。
     while time.monotonic() < deadline:
         page.wait_for_timeout(120)  # 让浏览器有时间触发请求和响应回调。
         while pending:  # 依次检查已收到的本轮响应。
             response = pending.popleft()
-            if _response_may_contain_upload(response, extra_hosts):  # 先检查域名、方法和状态。
+            if _response_may_contain_upload(response, extra_hosts):  # 先检查域名和方法。
+                if not response.ok:
+                    if 400 <= response.status <= 599 and _request_contains_image(response.request, path):
+                        raise HelperError(_http_upload_error(response.status, path))
+                    if (400 <= response.status <= 599 and possible_failure is None
+                            and _request_may_contain_image(response.request, path)):
+                        possible_failure = response.status
+                        notify(f'检测到可能相关的图片请求返回 HTTP {response.status}，正在确认上传结果。')
+                    continue  # 无法确认属于当前图片的失败请求不能误判。
                 url = _from_response(response)  # 再从响应体提取并校验图片地址。
                 if url:
                     # 网络响应完成不等于正文插入完成；等待图片网址实际出现，
@@ -420,20 +501,23 @@ def upload_one(page, path: Path, pending: deque, current_requests: set, *, timeo
                             return url  # 地址出现且可确认是本轮插入，才返回。
                         page.wait_for_timeout(120)  # 未插入时继续等待页面更新。
                     raise HelperError(f'图片已上传，但未能确认 CSDN 完成插入：{path.name}')
-    raise HelperError(f'图片上传失败或超时：{path.name}')  # 截止时间内没有得到有效结果。
+    hint = (f'可能相关的图片请求返回 HTTP {possible_failure}；' if possible_failure else '')
+    raise HelperError(f'图片上传失败或未能确认结果：{path.name}。{hint}请检查网络和 CSDN 登录状态；'
+                      '图片可能已经上传，请检查文章后再重试，避免重复上传。')
 
 
 def process_article(target, markdown_path: Path, recovery_dir: Path,
                     notify=lambda message: None, *, timeout_ms: int = 60_000,
                     extra_hosts: set[str] | None = None, mode: str = 'auto',
                     expected_before: str | None = None,
-                    backup_existing: bool = True) -> ProcessResult:
+                    backup_existing: bool = True, cancel_event=None) -> ProcessResult:
     # 作用：组织正文导入、图片保护、上传、逐步替换和资源清理。
     # 使用场景：界面要求导入文档或修复现有正文时调用；成功返回 ProcessResult。
     # 参数：target 是目标编辑页；markdown_path 决定文档和图片的相对路径基准。
     # recovery_dir 是备份目录；notify 用于进度通知；timeout_ms 控制上传等待。
     # mode 可为 auto、import 或 repair；expected_before 用于检查确认后是否被修改。
     # backup_existing 控制是否备份已有正文；extra_hosts 主要用于本地模拟测试。
+    # cancel_event 仅在写入前和图片处理之间生效，避免中途打断一次上传。
     """Import text first, then upload and replace each image in the same tab."""
     try:  # 无论导入还是修复，都需要文档路径作为本地图片的解析基准。
         md_text = markdown_path.read_text(encoding='utf-8-sig')  # 支持 UTF-8 文档及可选 BOM。
@@ -448,6 +532,8 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
         raise HelperError('处理前编辑器内容发生变化，未开始上传。请检查后重试。')
     if mode not in {'auto', 'import', 'repair'}:  # 仅接受明确支持的处理方式。
         raise HelperError('未知的正文处理方式。')  # 拒绝不受支持的模式值。
+
+    _check_cancelled(cancel_event, 0, 0, before_write=True)  # 已请求停止时不开始写入。
     # 导入模式使用本地全文；修复模式保留编辑器正文并恢复未完成的图片标记。
     imported = mode == 'import' or (mode == 'auto' and not has_meaningful_text(before))  # 确定正文来源。
     body = md_text if imported else restore_image_placeholders(before)  # 修复时先还原旧保护标记。
@@ -484,6 +570,7 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
     target.on('request', on_request)  # 处理期间订阅页面请求。
     target.on('response', on_response)  # 处理期间订阅页面响应。
     try:
+        _check_cancelled(cancel_event, 0, len(refs_by_path), before_write=True)
         # 导入时先写完整正文；缺图的错误随后报告，已导入的文字仍会保留。
         if imported:  # 导入模式先将保护后的完整正文写入编辑器。
             notify('正在导入完整 Markdown 正文。')
@@ -514,11 +601,13 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
         # 每轮都以原文和累计结果重新生成正文，避免替换后字符位置偏移。
         replacements = []  # 逐步累计每处图片引用与上传地址的对应关系。
         for index, (path, refs) in enumerate(refs_by_path.items(), 1):
+            _check_cancelled(cancel_event, index - 1, count)  # 两张图片之间是安全停止点。
             notify(f'正在上传 {index}/{count}：{path.name}')  # 向界面显示当前进度。
+            _check_cancelled(cancel_event, index - 1, count)  # 避免通知与粘贴之间错过停止请求。
             _ensure_editor_unchanged(target, working)  # 上传前确认正文仍是上一轮的结果。
             try:  # 单张图片失败时保留前面已完成的结果。
                 url = upload_one(target, path, pending, current_requests,
-                                 timeout_ms=timeout_ms, extra_hosts=extra_hosts)
+                                 timeout_ms=timeout_ms, extra_hosts=extra_hosts, notify=notify)
             except Exception as exc:
                 # 未检测到用户新操作时，恢复上一轮正文并保留已完成的图片。
                 _ensure_editor_unchanged(target)  # 若用户已操作则直接停止，不再恢复覆盖。

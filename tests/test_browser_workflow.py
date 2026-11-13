@@ -5,6 +5,7 @@ import json  # 构造模拟的 CSDN 上传响应。
 from pathlib import Path  # 创建测试文档和图片路径。
 import tempfile  # 为每个测试创建隔离的临时目录。
 import threading  # 在后台运行本地 HTTP 服务。
+import time  # 验证确定的上传失败不必等待完整超时。
 import unittest  # 提供测试用例及断言。
 from unittest.mock import patch  # 临时替换函数以模拟写入失败。
 from urllib.parse import unquote  # 还原请求头中的编辑器正文。
@@ -12,6 +13,7 @@ from types import SimpleNamespace  # 构造多标签检查所需的简化页面�
 
 from playwright.sync_api import sync_playwright
 
+import csdn_browser
 from csdn_browser import HelperError, choose_target, editor_text, process_article
 from md_images import IMAGE_PLACEHOLDER, restore_image_placeholders
 
@@ -48,13 +50,22 @@ editor.addEventListener('paste', async (event) => {
         }
         return;
     }
+    if (window.sendUnrelatedFailure) {
+        // 模拟编辑器同时发生的无关失败请求，不能误认为图片上传失败。
+        fetch('/unrelated', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    }
+    if (window.sendUnrelatedImageFailure) {
+        fetch('/unrelated', {method:'POST', body:new Blob(['other'], {type:'image/png'})});
+    }
     const before = editor.textContent;
-    const response = await fetch('/upload', {method:'POST', body:file,
-        headers: {'X-Editor-Text': encodeURIComponent(before)}});
+    const body = window.uploadAsBytes ? new Uint8Array(await file.arrayBuffer()) : file;
+    const headers = {'X-Editor-Text': encodeURIComponent(before)};
+    if (window.uploadAsBytes) headers['Content-Type'] = file.type;
+    const response = await fetch('/upload', {method:'POST', body, headers});
     if (response.ok) {
-        const body = await response.json();
+        const responseBody = await response.json();
         // Model the real editor's potentially destructive asynchronous insert.
-        setTimeout(() => { editor.textContent = '![图片](' + body.data.imageUrl + ')'; }, 60);
+        setTimeout(() => { editor.textContent = '![图片](' + responseBody.data.imageUrl + ')'; }, 60);
     }
 });
 </script>'''.encode('utf-8')
@@ -68,6 +79,9 @@ class TestServer(BaseHTTPRequestHandler):
     editor_snapshots = []  # 按请求顺序记录上传开始时的编辑器正文。
     fail = False  # True 时所有上传请求都返回失败。
     fail_indices = set()  # 指定需要失败的上传请求序号。
+    fail_status = 503  # 可由测试替换具体 HTTP 状态。
+    upload_started = None  # 可由测试监听服务端已收到上传。
+    hold_response = None  # 可由测试暂缓服务端响应，验证上传中停止。
 
     def log_message(self, *args):
         # 作用：覆盖默认 HTTP 请求日志输出。
@@ -85,11 +99,19 @@ class TestServer(BaseHTTPRequestHandler):
     def do_POST(self):
         # 作用：记录上传内容并返回模拟图片地址或错误。
         # 使用场景：模拟编辑器向本地服务器提交图片时调用。
+        if self.path == '/unrelated':
+            self.send_response(403)
+            self.end_headers()
+            return
         size = int(self.headers.get('Content-Length', 0))  # 从请求头取得上传字节数。
         type(self).uploads.append(self.rfile.read(size))  # 保存本次收到的图片内容。
         type(self).editor_snapshots.append(unquote(self.headers.get('X-Editor-Text', '')))  # 保存上传前正文。
+        if type(self).upload_started is not None:
+            type(self).upload_started.set()
+        if type(self).hold_response is not None:
+            type(self).hold_response.wait(timeout=5)
         if type(self).fail or len(type(self).uploads) in type(self).fail_indices:
-            self.send_response(503)  # 由测试指定失败时返回服务不可用。
+            self.send_response(type(self).fail_status)  # 由测试指定返回的失败状态。
             self.end_headers()  # 结束失败响应的请求头。
             return  # 此次不返回图片地址。
         url = f'https://i-blog.csdnimg.cn/mock-{len(type(self).uploads)}.png'  # 为本次上传生成模拟地址。
@@ -132,6 +154,9 @@ class BrowserWorkflowTest(unittest.TestCase):
         TestServer.editor_snapshots = []  # 清空上一用例的正文快照。
         TestServer.fail = False  # 默认允许上传。
         TestServer.fail_indices = set()  # 默认没有指定失败序号。
+        TestServer.fail_status = 503
+        TestServer.upload_started = None
+        TestServer.hold_response = None
         self.tmp = tempfile.TemporaryDirectory()  # 创建当前用例专用目录。
         self.addCleanup(self.tmp.cleanup)  # 用例结束后自动清理该目录。
         self.root = Path(self.tmp.name)  # 保存临时目录路径。
@@ -153,8 +178,9 @@ class BrowserWorkflowTest(unittest.TestCase):
         # 作用：使用测试页面和本地目录调用文章处理流程。
         # 使用场景：各流程测试调用；只允许本地测试服务器作为额外响应来源。
         # extra_hosts 为测试服务器放行 127.0.0.1；timeout_ms 缩短失败等待时间。
+        kwargs.setdefault('timeout_ms', 700)
         return process_article(self.target, self.md, self.root / 'recovery', notify,
-                               timeout_ms=700, extra_hosts={'127.0.0.1'}, **kwargs)
+                               extra_hosts={'127.0.0.1'}, **kwargs)
 
     # 保留页面中的修改，同一张图片被引用两次时只上传一次。
     def test_existing_draft_keeps_edits_and_deduplicates_images(self):
@@ -357,6 +383,48 @@ class BrowserWorkflowTest(unittest.TestCase):
             self.run_process()
         self.assertEqual(restore_image_placeholders(editor_text(self.target)), text)  # 移除保护标记后正文一致。
 
+    def test_upload_http_failure_explains_status(self):
+        # 作用：确认与图片文件匹配的失败响应会报告实际 HTTP 状态。
+        # 使用场景：服务拒绝图片时，不让用户只看到笼统超时。
+        self.fill_target('正文\n![图片](two.png)')
+        TestServer.fail = True
+        with self.assertRaisesRegex(HelperError, 'HTTP 503'):
+            self.run_process()
+
+    def test_failed_request_matches_file_content_not_unrelated_form_field(self):
+        # 作用：区分真正的图片文件字段和恰好含相同字节的普通表单字段。
+        # 使用场景：页面中其他请求失败时，不能提前报错或中断图片上传。
+        path = self.root / 'two.png'
+        body = b'--boundary\r\nContent-Disposition: form-data; name="comment"\r\n\r\nfake-image-B\r\n--boundary--\r\n'
+        request = SimpleNamespace(headers={'content-type': 'multipart/form-data; boundary=boundary'},
+                                  post_data_buffer=body)
+        self.assertFalse(csdn_browser._request_contains_image(request, path))
+        request.post_data_buffer = (b'--boundary\r\nContent-Disposition: form-data; name="file"; '
+                                    b'filename="two.png"\r\nContent-Type: image/png\r\n\r\n'
+                                    b'fake-image-B\r\n--boundary--\r\n')
+        self.assertTrue(csdn_browser._request_contains_image(request, path))
+
+    def test_unrelated_failed_request_does_not_abort_upload(self):
+        # 作用：其他接口返回失败时，不能把它当成当前图片的失败。
+        # 使用场景：编辑页可能同时发送保存或其他后台请求。
+        self.fill_target('正文\n![图片](two.png)')
+        self.target.evaluate('() => { window.sendUnrelatedFailure = true; window.sendUnrelatedImageFailure = true; }')
+        result = self.run_process()
+        self.assertEqual(result.image_count, 1)
+        self.assertIn('https://i-blog.csdnimg.cn/mock-1.png', editor_text(self.target))
+
+    def test_confirmed_image_request_reports_failure_without_full_timeout(self):
+        # 作用：请求体能确认包含图片时，立即报告服务拒绝状态。
+        # 使用场景：避免确定的上传失败仍等待完整超时时间。
+        self.fill_target('正文\n![图片](two.png)')
+        self.target.evaluate('() => { window.uploadAsBytes = true; }')
+        TestServer.fail = True
+        TestServer.fail_status = 413
+        start = time.monotonic()
+        with self.assertRaisesRegex(HelperError, 'HTTP 413'):
+            self.run_process(timeout_ms=10000)
+        self.assertLess(time.monotonic() - start, 7)
+
     def test_external_click_is_reported_without_claiming_text_changed(self):
         # 作用：页面其他控件发生点击但正文未变时，给出准确的保护提示。
         # 使用场景：用户在处理期间点击浏览器编辑页面的其他区域。
@@ -370,6 +438,53 @@ class BrowserWorkflowTest(unittest.TestCase):
             self.run_process(click_outside)
         self.assertEqual(restore_image_placeholders(editor_text(self.target)), text)
         self.assertEqual(TestServer.uploads, [])
+
+    def test_cancel_after_one_image_preserves_progress_and_can_resume(self):
+        # 作用：安全停止时保留已完成图片，继续修复时只上传剩余图片。
+        # 使用场景：用户在多图处理过程中点击停止按钮。
+        cancelled = threading.Event()
+        def stop_after_first(message):
+            if message.startswith('已替换 1/2'):
+                cancelled.set()
+        with self.assertRaisesRegex(csdn_browser.ProcessingCancelled, '已完成 1/2'):
+            self.run_process(stop_after_first, mode='import', cancel_event=cancelled)
+        partial = editor_text(self.target)
+        self.assertIn('![一](https://i-blog.csdnimg.cn/mock-1.png)', partial)
+        self.assertEqual(TestServer.uploads, [b'fake-image-A'])
+        cancelled.clear()
+        result = self.run_process(mode='repair', cancel_event=cancelled)
+        self.assertEqual(result.image_count, 1)
+        self.assertEqual(TestServer.uploads, [b'fake-image-A', b'fake-image-B'])
+
+    def test_cancel_before_import_preserves_existing_body(self):
+        # 作用：尚未开始写入时收到停止请求，不改动现有正文。
+        # 使用场景：用户在任务刚开始时立即点击停止。
+        cancelled = threading.Event()
+        cancelled.set()
+        self.fill_target('原有正文')
+        with self.assertRaises(csdn_browser.ProcessingCancelled):
+            self.run_process(mode='import', cancel_event=cancelled)
+        self.assertEqual(editor_text(self.target), '原有正文')
+        self.assertEqual(TestServer.uploads, [])
+
+    def test_cancel_during_upload_finishes_current_image_before_stopping(self):
+        # 作用：请求停止发生在图片上传中时，先确认并替换当前图片再退出。
+        # 使用场景：避免异步上传稍后插入图片而破坏已恢复的正文。
+        cancelled = threading.Event()
+        TestServer.upload_started = threading.Event()
+        TestServer.hold_response = threading.Event()
+        def request_during_upload():
+            if TestServer.upload_started.wait(timeout=5):
+                cancelled.set()
+            TestServer.hold_response.set()
+        worker = threading.Thread(target=request_during_upload, daemon=True)
+        worker.start()
+        with self.assertRaisesRegex(csdn_browser.ProcessingCancelled, '已完成 1/2'):
+            self.run_process(mode='import', cancel_event=cancelled)
+        worker.join(timeout=5)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(TestServer.uploads, [b'fake-image-A'])
+        self.assertIn('![一](https://i-blog.csdnimg.cn/mock-1.png)', editor_text(self.target))
 
     # 处理途中检测到用户操作时停止，不能覆盖用户新输入的内容。
     def test_concurrent_edits_are_not_overwritten(self):

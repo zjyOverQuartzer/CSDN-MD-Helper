@@ -12,7 +12,7 @@ import threading  # 将浏览器操作放到后台线程。
 import tkinter as tk  # 创建桌面窗口与可绑定到控件的变量。
 from tkinter import filedialog, messagebox, ttk  # 文件对话框、提示框和界面控件。
 
-from csdn_browser import (CSDN_EDITOR_URL, HelperError, choose_target, editor_text,
+from csdn_browser import (CSDN_EDITOR_URL, HelperError, ProcessingCancelled, choose_target, editor_text,
                           has_meaningful_text, process_article)
 from md_images import find_images, local_path
 
@@ -64,6 +64,7 @@ class BrowserWorker(threading.Thread):
         self.commands = commands  # 接收主线程发送的任务。
         self.events = events  # 将进度、错误和确认请求发送给主线程。
         self.answers = queue.Queue()  # 接收用户对确认弹窗的回答。
+        self.cancel_event = threading.Event()  # 主线程可在后台上传期间请求安全停止。
         self.playwright = None  # 尚未启动 Playwright，启动后保存其实例。
         self.context = None  # 保存助手专用的持久化浏览器上下文。
         self.browser_name = None  # 保存当前启动的浏览器名称。
@@ -194,6 +195,8 @@ class BrowserWorker(threading.Thread):
         # 先读取当前正文用于确认；处理时会再次比较，防止确认后发生覆盖。
         target = choose_target(self.context)
         before = editor_text(target)  # 保留确认前正文，稍后检查其间是否发生变化。
+        if self.cancel_event.is_set():
+            raise ProcessingCancelled('已停止：尚未修改正文或上传图片。')
         if mode == 'import' and has_meaningful_text(before):
             # 根据备份开关生成不同的确认说明，避免用户误以为一定有备份。
             backup_note = ('工具会先保存一份本地备份。' if backup_existing
@@ -209,7 +212,8 @@ class BrowserWorker(threading.Thread):
         # 把正文快照、备份选项和进度回调交给实际处理函数。
         result = process_article(target, markdown_path, DATA_ROOT / 'recovery',
                                  lambda message: self.send('log', message),
-                                 mode=mode, expected_before=before, backup_existing=backup_existing)
+                                 mode=mode, expected_before=before, backup_existing=backup_existing,
+                                 cancel_event=self.cancel_event)
         target.bring_to_front()  # 完成后把文章页面切到前台，方便用户检查。
         # 根据处理模式和结果统计拼接成功提示；只有实际创建备份才显示路径。
         action = '已将所选 Markdown 导入编辑器' if result.imported else '已修复编辑器中的原正文'
@@ -238,6 +242,8 @@ class BrowserWorker(threading.Thread):
                     self.open_browser(argument)  # 在工作线程执行浏览器启动。
                 elif command == 'process':  # 文章处理任务携带一组参数。
                     self.process(*argument)  # 将参数组展开后执行处理。
+            except ProcessingCancelled as exc:
+                self.send('cancelled', str(exc))  # 安全停止不是上传错误。
             except HelperError as exc:
                 # 可预期错误直接展示已有的中文提示。
                 self.send('error', str(exc))
@@ -425,6 +431,9 @@ class Application(tk.Tk):
         self.process_button = ttk.Button(left, text='开始处理正文与图片', command=self.process,
                                           style='Primary.TButton')
         self.process_button.pack(fill='x', pady=(14, 0))
+        self.cancel_button = ttk.Button(left, text='停止处理', command=self.request_stop,
+                                       style='Secondary.TButton', state='disabled')
+        self.cancel_button.pack(anchor='w', pady=(7, 0))
 
         # 进度文字、进度条和日志保留原状态变量；处理时日志随右侧区域扩展。
         self._section_heading(right, '处理进度', 'progress', colors['progress_surface'])
@@ -460,7 +469,8 @@ class Application(tk.Tk):
         self.task_panel.bind('<Configure>', self._schedule_page_layout)
         self.bind('<MouseWheel>', self._scroll_page, add='+')
         for widget in (self.file_entry, self.file_button, self.browser_combo, self.open_button,
-                       self.import_radio, self.repair_radio, self.backup_checkbox, self.process_button):
+                       self.import_radio, self.repair_radio, self.backup_checkbox, self.process_button,
+                       self.cancel_button):
             widget.bind('<FocusIn>', lambda event: self.after_idle(self._ensure_widget_visible, event.widget), add='+')
 
     def _configure_choice_indicators(self, style: ttk.Style):
@@ -744,6 +754,10 @@ class Application(tk.Tk):
         state = 'disabled' if value else 'normal'  # Tk 控件使用字符串表示启用状态。
         self.open_button.configure(state=state)  # 切换“打开 CSDN”按钮。
         self.process_button.configure(state=state)  # 切换“开始处理”按钮。
+        can_stop = value and self.active_action == 'process' and not self.worker.cancel_event.is_set()
+        self.cancel_button.configure(state='normal' if can_stop else 'disabled',
+                                     text='正在停止…' if value and self.active_action == 'process'
+                                     and self.worker.cancel_event.is_set() else '停止处理')
         self.backup_checkbox.configure(state=state)  # 切换备份选项。
         self.file_entry.configure(state=state)  # 处理期间固定所选文档路径。
         self.file_button.configure(state=state)  # 处理期间不能选择另一份文档。
@@ -783,12 +797,25 @@ class Application(tk.Tk):
                                    '或重新选择当前浏览器后再处理文章。', parent=self)
             return
         self.active_action = 'process'
+        self.worker.cancel_event.clear()  # 新任务独立于上一次停止请求。
         self.progress_value.set(0)
         self.progress_text.set('正在准备…')
         self.set_busy(True)  # 锁定相关控件直到工作线程报告 idle。
         self.status.set('正在处理，请在完成前不要修改文章正文。')  # 提醒避免并发修改。
         # 按工作线程 process 方法的参数顺序打包路径、模式和备份选项。
         self.commands.put(('process', (Path(value), self.mode.get(), self.backup_existing.get())))
+
+    def request_stop(self):
+        # 作用：向后台任务发送停止请求，同时说明当前上传仍需结束。
+        # 使用场景：用户在处理正文与图片期间点击“停止处理”。
+        if not self.busy or self.active_action != 'process' or self.worker.cancel_event.is_set():
+            return
+        self.worker.cancel_event.set()
+        self.cancel_button.configure(state='disabled', text='正在停止…')
+        self.progress_text.set('正在停止…')
+        message = '已请求停止，当前图片处理完成或超时后停止。'
+        self.status.set(message)
+        self.append_log(message)
 
     def poll_events(self):
         # 作用：读取后台消息并更新界面、确认弹窗和日志。
@@ -800,9 +827,13 @@ class Application(tk.Tk):
                 if kind == 'log':
                     # 普通进度同时显示在日志框和状态栏。
                     self.append_log(message)  # 追加日志。
-                    self.status.set(message)  # 更新最近一条状态。
+                    stopping = self.active_action == 'process' and self.worker.cancel_event.is_set()
+                    if not stopping:
+                        self.status.set(message)  # 停止期间保留等待当前图片的说明。
                     if self.active_action == 'process':
                         self._update_progress(message)
+                        if stopping:
+                            self.progress_text.set('正在停止…')
                 elif kind == 'ready':  # 浏览器启动成功。
                     # 后台已经成功打开浏览器，允许后续处理文章。
                     self.browser_open = True
@@ -829,6 +860,11 @@ class Application(tk.Tk):
                     self.progress_value.set(100)
                     self.progress_text.set('处理完成')
                     messagebox.showinfo(APP_NAME, message, parent=self)  # 展示结果弹窗。
+                elif kind == 'cancelled':
+                    self.append_log(message)
+                    self.status.set('已安全停止，请检查当前正文。')
+                    self.progress_text.set('已停止')
+                    messagebox.showinfo(APP_NAME, message, parent=self)
                 elif kind == 'error':  # 操作过程中发生错误。
                     # 错误信息既写入日志，也通过弹窗提示。
                     self.append_log(message)  # 保留错误文本供用户查看。
