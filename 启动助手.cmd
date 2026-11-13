@@ -8,9 +8,9 @@ if exist "%~dp0.venv\Scripts\python.exe" (
   set "HELPER_PYTHON=python"
   set "HELPER_PYTHONW=pythonw"
 )
-"%HELPER_PYTHON%" -c "import tkinter; import playwright.sync_api" >nul 2>&1
+"%HELPER_PYTHON%" -c "import tkinter; import playwright.sync_api; import markdown_it" >nul 2>&1
 if errorlevel 1 (
-  echo Python with tkinter and playwright is required.
+  echo Python with tkinter, playwright and markdown-it-py is required.
   echo See README.md for installation instructions.
   pause
   exit /b 1

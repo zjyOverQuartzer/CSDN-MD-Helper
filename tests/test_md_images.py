@@ -84,6 +84,44 @@ class MarkdownImagesTest(unittest.TestCase):
         # 只应识别围栏之外的 b.png，不能识别代码块中的图片。
         self.assertEqual([r.source for r in find_images(text)], ['b.png'])
 
+    def test_indented_code_is_ignored_without_losing_list_images(self):
+        # 作用：区分真正的缩进代码块和列表中的普通缩进内容。
+        # 使用场景：文章中同时包含示例代码、列表图片和引用内代码时。
+        text = (
+            '    ![代码示例](code.png)\r\n'
+            '    <img src="code-html.png">\r\n'
+            '\r\n'
+            '- 列表项\r\n'
+            '    ![列表图片](list.png)\r\n'
+            '\r\n'
+            '>     ![引用内代码](quote-code.png)\r\n'
+            '\r\n'
+            '正文段落\r\n'
+            '    ![段落续行](continuation.png)\r\n'
+            '\r\n'
+            '![正文图片](normal.png)\r\n'
+        )
+        refs = find_images(text)
+        self.assertEqual([ref.source for ref in refs], ['list.png', 'continuation.png', 'normal.png'])
+        result = rewrite(text, [(refs[0], 'https://i-blog.csdnimg.cn/list.png')])
+        self.assertIn('    ![代码示例](code.png)', result)
+        self.assertIn('    ![列表图片](https://i-blog.csdnimg.cn/list.png)', result)
+
+    def test_html_image_uses_exact_src_attribute(self):
+        # 作用：确保 data-src、标题文字与包含 > 的属性不会冒充 src。
+        # 使用场景：HTML 图片含懒加载属性、不同引号或多行属性时。
+        text = (
+            '<img data-src="wrong.png" title="src=bogus > example" SRC = "actual.png">\n'
+            '<img data-src="only-data.png">\n'
+            "<img alt='描述'\n src='second.png' width='200'>\n"
+            '<img src=third.png>\n'
+        )
+        refs = find_images(text)
+        self.assertEqual([ref.source for ref in refs], ['actual.png', 'second.png', 'third.png'])
+        result = rewrite(text, [(refs[0], 'https://i-blog.csdnimg.cn/actual.png')])
+        self.assertIn('data-src="wrong.png"', result)
+        self.assertIn('SRC = "https://i-blog.csdnimg.cn/actual.png"', result)
+
     # Windows 带括号的目录前，反斜杠应保留为路径分隔符。
     @unittest.skipUnless(os.name == 'nt', 'Windows path separator case')
     def test_windows_parenthesized_directory_preserves_separator(self):

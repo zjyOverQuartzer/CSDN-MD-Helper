@@ -5,14 +5,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass  # 使用数据类集中保存图片引用信息。
 import html  # 处理 HTML 实体及输出地址中的特殊字符。
+from html.parser import HTMLParser  # 解析 HTML 标签，避免把 data-src 当成 src。
 import os  # 根据操作系统区分 Windows 路径。
 from pathlib import Path  # 拼接、规范化和比较文件路径。
 import re  # 识别 Markdown 定义、HTML 图片及其他语法。
 from urllib.parse import unquote, urlsplit  # 解析 file: 地址并还原百分号编码。
 
+from markdown_it import MarkdownIt  # 识别代码块，保留列表与引用中的正常图片。
+
 # 两个不可见字符用于暂时拆开图片标记，例如在 ! 和 [ 之间插入。
 # 这样编辑器不会提前处理本地路径；上传完成或重试时仍可恢复原始标记。
 IMAGE_PLACEHOLDER = '\u200b\u2060'
+_MARKDOWN_BLOCK_PARSER = MarkdownIt('commonmark')  # 只使用块级结果，不改写文章内容。
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,7 @@ class ImageRef:
 def _masked_markdown(text: str) -> str:
     # 作用：用等长空格遮住代码块、行内代码及 HTML 注释。
     # 使用场景：扫描图片前调用，避免把示例代码当作真实图片，且保留原文坐标。
-    """Keep offsets while hiding fenced/inline code and HTML comments."""
+    """Keep offsets while hiding code blocks, inline code and HTML comments."""
     chars = list(text)  # 字符串不可原地修改，先转成可按位置修改的列表。
 
     def mask(start: int, end: int) -> None:
@@ -52,24 +56,16 @@ def _masked_markdown(text: str) -> str:
             if chars[index] not in "\r\n":  # 换行符必须保留，行结构才能保持一致。
                 chars[index] = " "  # 其他字符替换成等长空格。
 
-    # 先遮住反引号或波浪线围成的代码块，再遮住 HTML 注释。
-    fence_char = ""  # 当前代码块的围栏字符；空字符串表示不在代码块中。
-    fence_length = 0  # 开始围栏的长度，用于验证结束围栏。
-    offset = 0  # 当前行在整篇原文中的起始坐标。
-    for line in text.splitlines(keepends=True):
-        # 匹配行首至多三个空格后的代码围栏，并保留围栏后面的内容。
-        match = re.match(r" {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
-        if fence_char:  # 已经进入代码块，整行内容都要遮住。
-            mask(offset, offset + len(line))
-            # 结束围栏必须使用同样字符、长度足够且后面没有其他文本。
-            if (match and match.group(1)[0] == fence_char
-                    and len(match.group(1)) >= fence_length
-                    and not match.group(2).strip()):
-                fence_char = ""  # 找到结束围栏，之后的行恢复正常扫描。
-        elif match:  # 不在代码块内，但本行是新的开始围栏。
-            fence_char, fence_length = match.group(1)[0], len(match.group(1))
-            mask(offset, offset + len(line))  # 围栏本身也不能被识别为图片。
-        offset += len(line)  # 累加包含换行符的行长，保持与原文坐标一致。
+    # 用 Markdown 块级解析结果判断代码块，不能简单把四个空格都视作代码：
+    # 列表项和引用中也可能有正常缩进，解析器能保留这些上下文。
+    line_starts = [0] + [match.end() for match in re.finditer(r'\r\n|\r|\n', text)]
+    for token in _MARKDOWN_BLOCK_PARSER.parse(text):
+        if token.type not in {'code_block', 'fence'} or token.map is None:
+            continue
+        start_line, end_line = token.map  # Markdown 解析器返回左闭右开的行区间。
+        start = line_starts[start_line]
+        end = line_starts[end_line] if end_line < len(line_starts) else len(text)
+        mask(start, end)  # 转回原文字符区间，保持后续替换的坐标不变。
 
     masked = "".join(chars)  # 把当前遮罩列表转回字符串供正则查找。
     for match in re.finditer(r"<!--[\s\S]*?(?:-->|\Z)", masked):
@@ -200,6 +196,55 @@ def _inline_destination(text: str, start: int) -> tuple[int, int, int] | None:
     return None  # 一直没有找到图片语法的结束括号。
 
 
+class _HtmlImageLocator(HTMLParser):
+    # 作用：在不修改原文的前提下，定位 HTML img 标签的真实 src 属性。
+    # 使用场景：Typora 的 HTML 图片含 data-src、引号或多行属性时。
+    _attribute = re.compile(
+        r'''(?P<name>[^\s"'<>/=]+)(?:\s*=\s*(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)'|(?P<bare>[^\s>]+)))?''',
+        re.DOTALL,
+    )
+
+    def __init__(self, visible: str, original: str):
+        # 作用：保存等长遮罩及原文，建立 HTMLParser 行号到原文坐标的映射。
+        # 使用场景：每次扫描文章时创建独立实例，避免多个文档互相影响。
+        super().__init__(convert_charrefs=False)
+        self.original = original
+        self.line_starts = [0] + [match.end() for match in re.finditer('\n', visible)]
+        self.refs: list[ImageRef] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        # 作用：从真实 img 标签中找到名字恰好为 src 的第一个有值属性。
+        # 使用场景：HTMLParser 读到起始标签时调用；其他标签不处理。
+        if tag != 'img':
+            return
+        raw = self.get_starttag_text() or ''
+        line, column = self.getpos()
+        tag_start = self.line_starts[line - 1] + column
+        name = re.match(r'<\s*img\b', raw, re.IGNORECASE)
+        if not name:
+            return
+        position = name.end()
+        while position < len(raw):
+            while position < len(raw) and raw[position].isspace():
+                position += 1
+            if position >= len(raw) or raw[position] in '/>':
+                break
+            match = self._attribute.match(raw, position)
+            if not match:
+                position += 1  # 不认识的字符不应导致扫描死循环。
+                continue
+            position = match.end()
+            if match.group('name').lower() != 'src':
+                continue
+            group = next((key for key in ('double', 'single', 'bare') if match.group(key) is not None), None)
+            if group is not None:
+                start, end = match.span(group)
+                src_start, src_end = tag_start + start, tag_start + end
+                self.refs.append(ImageRef(src_start, src_end, self.original[src_start:src_end],
+                                          placeholder_at=tag_start + 1))
+            return  # 浏览器使用第一个同名属性，后续 src 不再覆盖它。
+
+
 def find_images(text: str) -> list[ImageRef]:
     # 作用：识别 Markdown 和 HTML 图片，并记录原文中的位置。
     # 使用场景：文件预检查和正式处理都会调用；返回按位置排序的 ImageRef 列表。
@@ -249,18 +294,11 @@ def find_images(text: str) -> list[ImageRef]:
             refs.append(ImageRef(start, end_alt + 1, src, alt, title, start + 1))
         pos = end_alt + 1  # 当前标记无法继续解析时，至少跳过描述区域。
 
-    # Typora 设置宽高时常生成 HTML 图片，此处只记录 src 的值。
-    html_pattern = re.compile(
-        r'''<img\b[^>]*?\bsrc\s*=\s*(?:(?P<q>["'])(?P<quoted>.*?)(?P=q)|(?P<bare>[^\s>]+))''',
-        re.IGNORECASE | re.DOTALL,
-    )
-    # 逐个查找可见文本里的 HTML 图片标签。
-    for match in html_pattern.finditer(visible):
-        group = "quoted" if match.group("q") else "bare"  # 按 src 是否有引号选择分组。
-        src_start, src_end = match.span(group)  # 只记录属性值的位置。
-        # 记录图片路径在原文中的坐标和保护标记插入位置。
-        refs.append(ImageRef(src_start, src_end, text[src_start:src_end],
-                             placeholder_at=match.start() + 1))
+    # 由 HTML 解析器区分真实 src 与 data-src，并保留原文中属性值的位置。
+    html_images = _HtmlImageLocator(visible, text)
+    html_images.feed(visible)
+    html_images.close()
+    refs.extend(html_images.refs)
     return sorted(refs, key=lambda ref: (ref.start, ref.end))  # 合并两种语法并按原文位置排序。
 
 
