@@ -354,17 +354,16 @@ def _ensure_editor_unchanged(page, expected: str | None = None) -> None:
     # 作用：检查用户交互、其他编辑标签和可选正文快照。
     # 使用场景：重要写入前后调用；发现风险时抛出 HelperError。
     # 同时检查用户交互、其他编辑标签和正文快照，发现变化立即停止。
-    if _user_interacted(page):  # 用户在处理期间操作过页面，不能继续覆盖。
+    if expected is not None and not _equivalent_editor_text(editor_text(page), expected):
         raise HelperError('检测到编辑器内容发生变化，已停止处理并保留当前正文；请检查后重试。')
+    if _user_interacted(page):  # 即使正文暂未变化，也不能假设用户的后续操作不会修改文章。
+        raise HelperError('检测到你操作了编辑页面，已停止处理以保护正文；请检查后重试。')
     # 查找除当前页外仍打开的 CSDN Markdown 编辑标签。
     others = [other for other in page.context.pages
               if other != page and not other.is_closed() and is_csdn_editor(other)]
     if others:  # 其他标签可能同步草稿，停止以保护当前内容。
         raise HelperError('检测到其他 CSDN Markdown 编辑标签页，已停止处理并保留当前正文；'
                           '请关闭其他标签页后重试。')
-    if expected is not None and not _equivalent_editor_text(editor_text(page), expected):  # 可选的快照对比。
-        # 内容与上一步快照不符，即便没有检测到用户操作也不能覆盖。
-        raise HelperError('检测到编辑器内容发生变化，已停止处理并保留当前正文；请检查后重试。')
 
 
 def _write_verified(page, text: str, previous: str, backup_path: Path | None) -> None:
@@ -375,7 +374,7 @@ def _write_verified(page, text: str, previous: str, backup_path: Path | None) ->
     _ensure_editor_unchanged(page)  # 写入前先排除用户操作和多标签冲突。
     try:
         if not _replace_editor_text(page, text):  # 写入时又发现用户操作。
-            raise HelperError('检测到编辑器内容发生变化，已停止处理并保留当前正文；请检查后重试。')
+            raise HelperError('检测到你操作了编辑页面，已停止处理以保护正文；请检查后重试。')
         written = _wait_for_text(page, text)  # 等待实际正文与目标匹配并稳定。
     except HelperError:
         raise  # 保护性错误直接向上传递，不尝试继续覆盖。

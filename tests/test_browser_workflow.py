@@ -357,6 +357,20 @@ class BrowserWorkflowTest(unittest.TestCase):
             self.run_process()
         self.assertEqual(restore_image_placeholders(editor_text(self.target)), text)  # 移除保护标记后正文一致。
 
+    def test_external_click_is_reported_without_claiming_text_changed(self):
+        # 作用：页面其他控件发生点击但正文未变时，给出准确的保护提示。
+        # 使用场景：用户在处理期间点击浏览器编辑页面的其他区域。
+        text = '正文\n![图片](two.png)'
+        self.fill_target(text)
+        self.target.evaluate("() => { const b = document.createElement('button'); b.id = 'outside'; b.textContent = '其他操作'; document.body.append(b); }")
+        def click_outside(message):
+            if message.startswith('正在上传'):
+                self.target.locator('#outside').click()
+        with self.assertRaisesRegex(HelperError, '检测到.*操作'):
+            self.run_process(click_outside)
+        self.assertEqual(restore_image_placeholders(editor_text(self.target)), text)
+        self.assertEqual(TestServer.uploads, [])
+
     # 处理途中检测到用户操作时停止，不能覆盖用户新输入的内容。
     def test_concurrent_edits_are_not_overwritten(self):
         # 作用：处理途中检测到用户操作时停止，不能覆盖用户新输入的内容。
