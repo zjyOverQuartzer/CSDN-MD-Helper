@@ -28,6 +28,7 @@ PYTHON_PACKAGES = ('playwright', 'pyee', 'greenlet', 'typing-extensions',
 # 只把明确列出的源码打入发行包，避免把浏览器登录数据或私人文档一起分发。
 SOURCE_FILES = (
     'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', '.gitignore',
+    '.github/workflows/windows-ci.yml',
     'requirements.txt', 'requirements-build.txt', 'dpi-aware.manifest',
     'app.py', 'csdn_browser.py', 'md_images.py', 'packaged_main.py',
     'build_release.py', '启动助手.cmd', '打包助手.cmd',

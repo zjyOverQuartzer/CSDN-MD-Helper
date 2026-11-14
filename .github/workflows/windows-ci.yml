@@ -1,0 +1,75 @@
+name: Windows 测试与打包
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: 配置已验证的 Python 版本
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+
+      - name: 创建隔离环境并安装固定版本
+        run: |
+          $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          python -m venv build/release-env
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $python = '.\build\release-env\Scripts\python.exe'
+          & $python -m pip install --no-deps -r requirements-build.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 运行源码测试
+        run: |
+          $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          .\build\release-env\Scripts\python.exe -m unittest discover -s tests -v
+
+      - name: 构建单文件程序
+        run: |
+          $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          .\build\release-env\Scripts\python.exe build_release.py
+
+      - name: 在隔离配置中运行打包自检
+        shell: pwsh
+        run: |
+          $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $executables = @(Get-ChildItem -Path dist -Filter CSDN-Markdown-Helper.exe -Recurse -File)
+          if ($executables.Count -ne 1) { throw '找不到唯一的打包程序。' }
+          $root = Join-Path $env:RUNNER_TEMP 'csdn-helper-self-test'
+          $local = Join-Path $root 'local'
+          $roaming = Join-Path $root 'roaming'
+          $temp = Join-Path $root 'temp'
+          New-Item -ItemType Directory -Path $local, $roaming, $temp -Force | Out-Null
+          $report = Join-Path $root 'report.txt'
+          $env:LOCALAPPDATA = $local
+          $env:APPDATA = $roaming
+          $env:TEMP = $temp
+          $env:TMP = $temp
+          $env:PYTHONHOME = ''
+          $env:PYTHONPATH = ''
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $arguments = @('--packaging-self-test', ('"' + $report + '"'))
+          $process = Start-Process -FilePath $executables[0].FullName -ArgumentList $arguments -WindowStyle Hidden -PassThru
+          if (-not $process.WaitForExit(360000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw '打包自检超时。'
+          }
+          if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report -Encoding UTF8 }
+          if ($process.ExitCode -ne 0) { throw "打包自检失败，退出码：$($process.ExitCode)" }

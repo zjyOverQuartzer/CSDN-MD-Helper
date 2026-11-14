@@ -67,6 +67,8 @@ py -3 -m venv .venv
 python -m unittest discover -s tests -v
 ```
 
+推送或创建 Pull Request 时，GitHub Actions 会在 Windows 上安装固定的构建依赖，运行源码测试、构建 exe 并执行打包自检，也可以在仓库的 **Actions** 页面手动运行。自动测试使用本地模拟编辑器，不会登录 CSDN 或上传图片；它不能代替没有安装 Python 的干净 Windows 电脑试用。
+
 ## 版权与许可证
 
 Copyright (c) 2026 zhangjiayu (GitHub: zjyOverQuartzer)
