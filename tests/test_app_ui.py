@@ -406,6 +406,8 @@ class AppUiTest(unittest.TestCase):
         self.assertFalse(self.window.busy)
 
 
+@unittest.skipIf(os.environ.get('CSDN_CI_HEADLESS') == '1',
+                 '托管环境缺少稳定的交互式桌面，界面缩放布局需在本机验证')
 class AppUiScalingTest(unittest.TestCase):
     # 作用：验证不同系统缩放比例下关键控件不会被裁掉。
     # 使用场景：修改字体、间距或窗口最小尺寸后执行。
