@@ -10,7 +10,9 @@ if not exist "build\release-env\Scripts\python.exe" (
 )
 
 echo Checking build dependencies...
-"build\release-env\Scripts\python.exe" -m pip install -r requirements-build.txt
+"build\release-env\Scripts\python.exe" -m pip install --no-deps -r requirements-build.txt
+if errorlevel 1 goto :failed
+"build\release-env\Scripts\python.exe" -m pip check
 if errorlevel 1 goto :failed
 
 "build\release-env\Scripts\python.exe" build_release.py

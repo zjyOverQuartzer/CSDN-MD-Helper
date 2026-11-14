@@ -1,5 +1,15 @@
 -r requirements.txt
-# 发行构建使用已验证的主要组件版本；普通源码运行仍遵循 requirements.txt。
-playwright==1.64.1
+# 发行构建固定已验证的直接依赖和间接依赖；普通源码运行仍遵循 requirements.txt。
+altgraph==0.17.5
+greenlet==3.5.6
 markdown-it-py==4.3.0
+mdurl==0.1.2
+packaging==26.3
+pefile==2024.8.26
+playwright==1.64.1
+pyee==14.0.0
 pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.10
+pywin32-ctypes==0.2.3
+setuptools==84.2.1
+typing-extensions==4.16.0

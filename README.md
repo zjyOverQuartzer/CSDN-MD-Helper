@@ -26,6 +26,8 @@ py -3 -m venv .venv
 
 在 Windows x64 上双击 `打包助手.cmd`。脚本会在项目的 `build\release-env` 创建独立构建环境，安装 `requirements-build.txt` 中的依赖，并在 `dist\v0.2.0` 生成 `CSDN-Markdown-Helper.exe` 和包含对应源码、许可证的发行压缩包。目标目录已存在时会使用新的编号目录，不覆盖已有文件；安装缺失依赖需要网络。
 
+`requirements-build.txt` 固定了已验证的打包工具和间接依赖版本；源码运行的依赖范围仍在 `requirements.txt`。自动构建使用 64 位 Python 3.12.10，其他 Python 版本或系统环境生成的文件可能有所不同。已有构建虚拟环境中的其他包不会由安装步骤自动删除。
+
 压缩包中的 `BUILD_INFO.json` 记录构建版本与文件摘要，`third_party_licenses/` 整理已收集的第三方许可证。发行前仍应在干净 Windows 环境测试，并核对 [第三方组件说明](THIRD_PARTY_NOTICES.md)。旧版 `v0.1.0` 的源码快照早于本项目添加 `LICENSE`；新发行版应使用包含许可证的源码版本。
 
 ## 使用
