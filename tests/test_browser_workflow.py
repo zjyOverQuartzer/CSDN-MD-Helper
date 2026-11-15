@@ -50,6 +50,7 @@ editor.addEventListener('paste', async (event) => {
         }
         return;
     }
+    window.testUploadStarted = true; // 区分首次导入与图片上传后的原生编辑。
     if (window.sendUnrelatedFailure) {
         // 模拟编辑器同时发生的无关失败请求，不能误认为图片上传失败。
         fetch('/unrelated', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
@@ -65,7 +66,22 @@ editor.addEventListener('paste', async (event) => {
     if (response.ok) {
         const responseBody = await response.json();
         // Model the real editor's potentially destructive asynchronous insert.
-        setTimeout(() => { editor.textContent = '![图片](' + responseBody.data.imageUrl + ')'; }, 60);
+        setTimeout(() => {
+            const inserted = '![图片](' + responseBody.data.imageUrl + ')';
+            if (window.preserveOnUpload) {
+                // 模拟编辑器保留原正文并在末尾插入上传结果。
+                if (window.alternateInsertion) {
+                    // 真实编辑器可能在末尾附近或开头插入，不能假定始终追加到最后。
+                    const index = ++window.uploadSequence % 2 === 0 ? 0 : Math.max(0, before.length - 1);
+                    editor.textContent = before.slice(0, index) + inserted + '\n' + before.slice(index);
+                } else {
+                    editor.textContent = before + (window.unexpectedOnUpload ? '\n未知外部内容' : '') + '\n' + inserted;
+                }
+            } else {
+                // 保留原有破坏性异步插入模型，验证兼容回退。
+                editor.textContent = inserted;
+            }
+        }, 60);
     }
 });
 </script>'''.encode('utf-8')
@@ -261,6 +277,211 @@ class BrowserWorkflowTest(unittest.TestCase):
         self.assertIn('正文开始', text)  # 开头文字保留。
         self.assertIn('中间文字', text)  # 中间文字保留。
         self.assertIn('正文结束', text)  # 末尾文字保留。
+
+    def test_preserved_editor_updates_references_without_replacing_full_text(self):
+        # 作用：正文仍完整时局部更新同一张图片的多种引用，避免再次整篇粘贴。
+        # 使用场景：一张图片在 Markdown、HTML 和引用式语法中重复出现。
+        original = ('# 合成文章🙂\n普通文字也有 图片 一.png，但不能改写。\n'
+                    '![首图](图片 一.png)\n中间😀\n'
+                    '<img data-src="ignore.png" src="图片 一.png" alt="说明" width="280">\n'
+                    '![引用图][same]\n[same]: <图片 一.png>\n末尾')
+        self.md.write_text(original, encoding='utf-8')
+        self.target.evaluate('() => { window.preserveOnUpload = true; }')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            result = self.run_process(mode='import')
+        url = 'https://i-blog.csdnimg.cn/mock-1.png'
+        expected = ('# 合成文章🙂\n普通文字也有 图片 一.png，但不能改写。\n'
+                    f'![首图]({url})\n中间😀\n'
+                    f'<img data-src="ignore.png" src="{url}" alt="说明" width="280">\n'
+                    f'![引用图]({url})\n[same]: <图片 一.png>\n末尾')
+        self.assertEqual(editor_text(self.target), expected)
+        self.assertEqual((result.image_count, result.reference_count), (1, 3))
+        self.assertEqual(len(TestServer.uploads), 1)
+        self.assertEqual(full_write.call_count, 1)  # 只在首次导入时整篇写入。
+
+    def test_unexpected_upload_mutation_is_not_overwritten(self):
+        # 作用：上传后出现无法归属的正文变化时停止，而不是覆盖未知内容。
+        # 使用场景：页面或其他来源在上传期间增加了未预期的文字。
+        self.md.write_text('原文\n![图片](two.png)\n末尾', encoding='utf-8')
+        self.target.evaluate('() => { window.preserveOnUpload = true; window.unexpectedOnUpload = true; }')
+        with self.assertRaisesRegex(HelperError, '变化|异常'):
+            self.run_process(mode='import')
+        self.assertIn('未知外部内容', editor_text(self.target))
+
+    def test_preserved_editor_accepts_upload_insertions_at_different_positions(self):
+        # 作用：确认临时插图无论在开头还是末尾附近都能安全移除并局部替换。
+        # 使用场景：CSDN 在连续上传时可能改变插入图片语法的位置。
+        original = '# 文章🙂\n![一](图片 一.png)\n内容😀\n![二](two.png)\n末尾\n'
+        self.md.write_text(original, encoding='utf-8')
+        self.target.evaluate('''() => {
+            window.preserveOnUpload = true;
+            window.alternateInsertion = true;
+            window.uploadSequence = 0;
+        }''')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            result = self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target),
+                         '# 文章🙂\n![一](https://i-blog.csdnimg.cn/mock-1.png)\n内容😀\n'
+                         '![二](https://i-blog.csdnimg.cn/mock-2.png)\n末尾\n')
+        self.assertEqual(result.image_count, 2)
+        self.assertEqual(full_write.call_count, 1)
+
+    def test_stable_text_check_does_not_read_entire_editor_repeatedly(self):
+        # 作用：核验稳定文本时由页面比较，避免多次把完整正文传回 Python。
+        # 使用场景：长文在每张图片处理后进行稳定性检查。
+        self.fill_target('长正文🙂\n末尾')
+        with patch.object(csdn_browser, 'editor_text', wraps=csdn_browser.editor_text) as read_text:
+            self.assertTrue(csdn_browser._wait_for_text(self.target, '长正文🙂\n末尾'))
+        self.assertEqual(read_text.call_count, 0)
+
+    def test_failed_local_edit_falls_back_from_known_intermediate_state(self):
+        # 作用：局部修改中途失败但正文仍是已知状态时，安全回退到原有全文写入。
+        # 使用场景：同一张图片有多处引用，编辑器拒绝其中一次局部插入。
+        self.md.write_text('开头🙂\n![一](two.png)\n中间\n![二](two.png)\n末尾', encoding='utf-8')
+        self.target.evaluate('''() => {
+            window.preserveOnUpload = true;
+            const original = document.execCommand.bind(document);
+            let inserts = 0;
+            document.execCommand = (...args) => {
+                if (args[0] === 'insertText' && ++inserts === 2) return false;
+                return original(...args);
+            };
+        }''')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            result = self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target),
+                         '开头🙂\n![一](https://i-blog.csdnimg.cn/mock-1.png)\n中间\n'
+                         '![二](https://i-blog.csdnimg.cn/mock-1.png)\n末尾')
+        self.assertEqual((result.image_count, result.reference_count), (1, 2))
+        self.assertEqual(full_write.call_count, 2)  # 首次导入一次，已知状态回退一次。
+
+    def test_user_edit_during_local_update_is_not_overwritten(self):
+        # 作用：局部更新期间出现用户交互和正文变化时立即停止。
+        # 使用场景：页面处理第一处引用时，其他编辑操作改变了正文。
+        self.md.write_text('开头\n![一](two.png)\n中间\n![二](two.png)', encoding='utf-8')
+        self.target.evaluate('''() => {
+            window.preserveOnUpload = true;
+            const original = document.execCommand.bind(document);
+            document.execCommand = (...args) => {
+                const result = original(...args);
+                if (args[0] === 'insertText') {
+                    window.__csdnMdHelperGuard.interacted = true;
+                    document.querySelector('pre').textContent += '\\n用户新文字';
+                }
+                return result;
+            };
+        }''')
+        with self.assertRaisesRegex(HelperError, '变化|操作'):
+            self.run_process(mode='import')
+        self.assertIn('用户新文字', editor_text(self.target))
+
+    def test_destructive_insert_uses_compatible_full_write(self):
+        # 作用：编辑器上传后暂时只剩图片时，仍能恢复完整正文和链接。
+        # 使用场景：旧版编辑器或异步行为不支持安全的局部替换。
+        self.md.write_text('正文\n![图片](two.png)\n末尾', encoding='utf-8')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target), '正文\n![图片](https://i-blog.csdnimg.cn/mock-1.png)\n末尾')
+        self.assertEqual(full_write.call_count, 2)
+
+    def test_local_update_removes_only_new_leading_newlines(self):
+        # 作用：局部编辑产生额外前导换行时删除额外部分并保留原文空行。
+        # 使用场景：CSDN 原生删除临时图片后异步或同步增加开头换行。
+        self.md.write_text('\n\n正文🙂\n![图片](two.png)\n末尾', encoding='utf-8')
+        self.target.evaluate('''() => {
+            window.preserveOnUpload = true;
+            const original = document.execCommand.bind(document);
+            let added = false;
+            document.execCommand = (...args) => {
+                const result = original(...args);
+                if (args[0] === 'delete' && window.testUploadStarted && !added) {
+                    added = true;
+                    const editor = document.querySelector('pre');
+                    editor.textContent = '\\n' + editor.textContent;
+                }
+                return result;
+            };
+        }''')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target), '\n\n正文🙂\n![图片](https://i-blog.csdnimg.cn/mock-1.png)\n末尾')
+        self.assertEqual(full_write.call_count, 1)
+
+    def test_local_update_accepts_editor_removing_a_trailing_newline(self):
+        # 作用：删除临时插图时编辑器调整末尾换行，仍能保留正文并更新图片。
+        # 使用场景：真实 CSDN 编辑器在原生删除后可能移除最后一个换行。
+        self.md.write_text('正文🙂\n![图片](two.png)\n末尾\n', encoding='utf-8')
+        self.target.evaluate('''() => {
+            window.preserveOnUpload = true;
+            const original = document.execCommand.bind(document);
+            let adjusted = false;
+            document.execCommand = (...args) => {
+                const result = original(...args);
+                if (args[0] === 'delete' && window.testUploadStarted && !adjusted) {
+                    adjusted = true;
+                    const editor = document.querySelector('pre');
+                    editor.textContent = editor.textContent.replace(/\\n$/, '');
+                }
+                return result;
+            };
+        }''')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            self.run_process(mode='import')
+        self.assertTrue(csdn_browser._equivalent_editor_text(
+            editor_text(self.target), '正文🙂\n![图片](https://i-blog.csdnimg.cn/mock-1.png)\n末尾\n'))
+        self.assertEqual(full_write.call_count, 1)
+
+    def test_changed_line_endings_use_safe_full_write(self):
+        # 作用：编辑器改变正文内部的换行编码时，不再使用可能错位的局部范围。
+        # 使用场景：修复原有 CRLF 正文时，编辑器把换行统一为 LF。
+        self.fill_target('原文\r\n![图](two.png)\r\n正文尾部')
+        self.target.evaluate('''() => {
+            window.preserveOnUpload = true;
+            const original = document.execCommand.bind(document);
+            let adjusted = false;
+            document.execCommand = (...args) => {
+                const result = original(...args);
+                if (args[0] === 'delete' && window.testUploadStarted && !adjusted) {
+                    adjusted = true;
+                    const editor = document.querySelector('pre');
+                    editor.textContent = editor.textContent.replace(/\\r\\n/g, '\\n');
+                }
+                return result;
+            };
+        }''')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            self.run_process(mode='repair')
+        self.assertTrue(csdn_browser._equivalent_editor_text(
+            editor_text(self.target), '原文\r\n![图](https://i-blog.csdnimg.cn/mock-1.png)\r\n正文尾部'))
+        self.assertEqual(full_write.call_count, 2)  # 先保护本地图，再从已知状态兼容写回。
+
+    def test_repeated_extra_newlines_use_known_state_fallback(self):
+        # 作用：编辑器反复增加前导换行时限制局部重试，并从已知正文状态回退。
+        # 使用场景：原生编辑行为与稳定的局部替换不兼容。
+        self.md.write_text('正文\n![图片](two.png)\n末尾', encoding='utf-8')
+        self.target.evaluate('''() => {
+            window.preserveOnUpload = true;
+            const original = document.execCommand.bind(document);
+            document.execCommand = (...args) => {
+                const result = original(...args);
+                if (args[0] === 'delete' && window.testUploadStarted) {
+                    const editor = document.querySelector('pre');
+                    editor.textContent = '\\n' + editor.textContent;
+                }
+                return result;
+            };
+            // 模拟编辑器在收到清理通知后也重新加入一个换行。
+            document.querySelector('pre').addEventListener('input', event => {
+                if (window.testUploadStarted && !event.isTrusted &&
+                    event.inputType === 'deleteContentBackward') {
+                    event.currentTarget.textContent = '\\n' + event.currentTarget.textContent;
+                }
+            });
+        }''')
+        with patch.object(csdn_browser, '_replace_editor_text', wraps=csdn_browser._replace_editor_text) as full_write:
+            self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target), '正文\n![图片](https://i-blog.csdnimg.cn/mock-1.png)\n末尾')
+        self.assertEqual(full_write.call_count, 2)
 
     # 删除编辑器额外加入的首部换行，但保留原文中有意留出的空行。
     def test_editor_extra_newline_is_removed_without_losing_blank_lines(self):
