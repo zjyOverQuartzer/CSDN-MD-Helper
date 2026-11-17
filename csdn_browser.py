@@ -759,11 +759,21 @@ def _write_verified(page, text: str, previous: str, backup_path: Path | None,
     if written:
         return  # 写入已确认，无需恢复。
     _ensure_editor_unchanged(page)  # 尝试恢复前再次确认没有新的用户操作。
-    try:
-        restored = _replace_editor_text(page, previous) and _wait_for_text(page, previous, require_guard=True)
-    except Exception:
-        restored = False  # 恢复过程异常时如实报告无法确认。
-    note = '已尝试恢复上一步正文。' if restored else '未能确认正文恢复成功。'
+    current = editor_text(page)
+    if not (_equivalent_editor_text(current, text) or _equivalent_editor_text(current, previous)):
+        # 校验失败后若出现其他内容，无法断定它来自哪次操作，保留当前正文供用户检查。
+        note = f' 本地备份：{backup_path}' if backup_path else ''
+        raise HelperError('CSDN 编辑器未确认写入结果，正文出现无法确认的变化；'
+                          '已停止并保留当前内容，请检查后重试。' + note)
+    if _equivalent_editor_text(current, previous):
+        note = '上一步正文已保留。'
+    else:
+        try:
+            restored = (_replace_editor_text(page, previous, expected_current=current) and
+                        _wait_for_text(page, previous, require_guard=True))
+        except Exception:
+            restored = False  # 恢复过程异常时如实报告无法确认。
+        note = '已尝试恢复上一步正文。' if restored else '未能确认正文恢复成功。'
     if backup_path:  # 有备份时可为用户提供进一步恢复依据。
         note += f' 本地备份：{backup_path}'  # 有备份时提供人工恢复位置。
     raise HelperError(f'CSDN 编辑器未确认写入结果，{note}')
@@ -976,9 +986,12 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
                                  timeout_ms=timeout_ms, extra_hosts=extra_hosts, notify=notify,
                                  editor_before=before_upload, snapshot_captured=True)
             except Exception as exc:
-                # 未检测到用户新操作时，恢复上一轮正文并保留已完成的图片。
-                _ensure_editor_unchanged(target)  # 若用户已操作则直接停止，不再恢复覆盖。
-                _write_verified(target, working, working, backup_path)  # 清除上传过程中可能出现的临时内容。
+                # 上传失败后先检查正文；出现无法确认的变化时保留当前内容，不能盲目写回旧快照。
+                _ensure_editor_unchanged(target)  # 守卫丢失或用户已操作时直接停止。
+                current = editor_text(target)
+                if not _equivalent_editor_text(current, before_upload):
+                    raise HelperError(f'图片上传未完成，编辑器正文发生无法确认的变化，已停止并保留当前内容。'
+                                      f'已完成 {index - 1}/{count} 张图片。{exc}\n请检查正文和图片后再重试。') from exc
                 raise HelperError(f'正文已保留，已完成 {index - 1}/{count} 张图片。{exc}\n'
                                   '请检查正文；可选择“仅修复当前正文”继续处理剩余图片。') from exc
             _ensure_editor_unchanged(target)  # 上传期间再次检查用户是否操作或打开其他标签。

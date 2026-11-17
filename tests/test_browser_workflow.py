@@ -308,6 +308,81 @@ class BrowserWorkflowTest(unittest.TestCase):
             self.run_process(mode='import')
         self.assertIn('未知外部内容', editor_text(self.target))
 
+    def test_page_reset_during_upload_does_not_restore_old_text(self):
+        # 作用：上传中页面状态被重置时，保留新页面中的正文并停止恢复。
+        # 使用场景：用户刷新或重新打开编辑页，原有交互守卫随之消失。
+        self.md.write_text('原文\n![图片](two.png)', encoding='utf-8')
+
+        def reset_page(page, *args, **kwargs):
+            page.evaluate('''() => {
+                delete window.__csdnMdHelperGuard;
+                document.querySelector('pre').textContent = '刷新后的新正文';
+            }''')
+            raise HelperError('上传中断')
+
+        with patch.object(csdn_browser, 'upload_one', side_effect=reset_page):
+            with self.assertRaisesRegex(HelperError, '状态已重置'):
+                self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target), '刷新后的新正文')
+
+    def test_failed_upload_does_not_overwrite_unknown_page_changes(self):
+        # 作用：上传失败后若页面又出现未知内容，不用旧快照覆盖。
+        # 使用场景：非用户输入的页面变化发生在上传报错之前。
+        self.md.write_text('原文\n![图片](two.png)', encoding='utf-8')
+
+        def fail_after_change(page, *args, **kwargs):
+            page.evaluate("() => { document.querySelector('pre').textContent += '\\n未知新内容'; }")
+            raise HelperError('上传中断')
+
+        with patch.object(csdn_browser, 'upload_one', side_effect=fail_after_change):
+            with self.assertRaisesRegex(HelperError, '正文发生无法确认的变化'):
+                self.run_process(mode='import')
+        self.assertIn('未知新内容', editor_text(self.target))
+
+    def test_page_reset_during_write_does_not_restore_old_text(self):
+        # 作用：正文写入后、稳定检查之前守卫丢失时停止处理。
+        # 使用场景：编辑页刷新后出现新内容，不能用旧备份覆盖。
+        original_write = csdn_browser._replace_editor_text
+
+        def reset_after_write(page, text, **kwargs):
+            result = original_write(page, text, **kwargs)
+            page.evaluate('''() => {
+                delete window.__csdnMdHelperGuard;
+                document.querySelector('pre').textContent = '刷新后的新正文';
+            }''')
+            return result
+
+        with patch.object(csdn_browser, '_replace_editor_text', side_effect=reset_after_write):
+            with self.assertRaisesRegex(HelperError, '状态已重置'):
+                self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target), '刷新后的新正文')
+
+    def test_change_between_check_and_full_write_is_not_overwritten(self):
+        # 作用：检查完成后、全文写入前出现的异步变化也不能被覆盖。
+        # 使用场景：页面脚本在兼容写回或首次导入时更新了正文。
+        original_write = csdn_browser._replace_editor_text
+
+        def change_before_write(page, text, **kwargs):
+            page.locator('pre').evaluate("editor => { editor.textContent = '写入前的新正文'; }")
+            return original_write(page, text, **kwargs)
+
+        with patch.object(csdn_browser, '_replace_editor_text', side_effect=change_before_write):
+            with self.assertRaisesRegex(HelperError, '内容发生变化'):
+                self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target), '写入前的新正文')
+
+    def test_unrecognized_text_after_failed_write_is_not_overwritten(self):
+        # 作用：写入校验失败后，保留既不是目标正文也不是旧正文的内容。
+        # 使用场景：等待编辑器稳定期间，页面脚本产生了无法归属的变化。
+        def timeout_after_change(page, *args, **kwargs):
+            page.locator('pre').evaluate("editor => { editor.textContent = '无法归属的新正文'; }")
+            return False
+
+        with patch.object(csdn_browser, '_wait_for_text', side_effect=timeout_after_change):
+            with self.assertRaisesRegex(HelperError, '正文出现无法确认的变化'):
+                self.run_process(mode='import')
+        self.assertEqual(editor_text(self.target), '无法归属的新正文')
+
     def test_preserved_editor_accepts_upload_insertions_at_different_positions(self):
         # 作用：确认临时插图无论在开头还是末尾附近都能安全移除并局部替换。
         # 使用场景：CSDN 在连续上传时可能改变插入图片语法的位置。
