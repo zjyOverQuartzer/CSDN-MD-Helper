@@ -279,7 +279,7 @@ def _paste_file(page, path: Path) -> None:
     }''', {'base64': payload, 'name': path.name, 'mime': mime})
 
 
-def _replace_editor_text(page, text: str) -> bool:
+def _replace_editor_text(page, text: str, *, expected_current: str | None = None) -> bool:
     # 作用：通过删除和粘贴事件写入正文。
     # 使用场景：导入、替换链接及恢复正文时调用；检测到用户交互则拒绝覆盖。
     # 通过编辑器的删除和文本粘贴流程写入，让网页自身处理内容变更。
@@ -287,9 +287,14 @@ def _replace_editor_text(page, text: str) -> bool:
     editor = page.locator(EDITOR_SELECTOR)  # 定位页面中可编辑的 Markdown 正文。
     # 以下页面脚本先检查用户交互标记，然后选中编辑区全部内容。
     # execCommand 删除选区后，将 text 放进 DataTransfer 并派发文本粘贴事件。
-    # 用户已交互时返回 false；否则只表示已发起写入，仍需后续核验实际正文。
-    replaced = editor.evaluate('''(editor, text) => {
-        if (window.__csdnMdHelperGuard?.interacted) return false;
+    # 检查快照与写入在同一段页面脚本中进行，避免中间的异步变化被覆盖。
+    replaced = editor.evaluate(r'''(editor, data) => {
+        const guard = window.__csdnMdHelperGuard;
+        if (!guard || guard.interacted) return 'guard';
+        const normalize = value => value.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+        if (data.expected !== null && normalize(editor.textContent || '') !== normalize(data.expected)) {
+            return 'changed';
+        }
         editor.focus();
         const range = document.createRange();
         range.selectNodeContents(editor);
@@ -298,14 +303,16 @@ def _replace_editor_text(page, text: str) -> bool:
         selection.addRange(range);
         document.execCommand('delete');
         const transfer = new DataTransfer();
-        transfer.setData('text/plain', text);
+        transfer.setData('text/plain', data.text);
         editor.dispatchEvent(new ClipboardEvent('paste', {
             clipboardData: transfer, bubbles: true, cancelable: true
         }));
-        return true;
-    }''', text)
-    if not replaced:  # 页面脚本返回 False，代表没有执行替换。
-        return False  # 页面脚本发现用户交互，没有执行覆盖。
+        return 'written';
+    }''', {'text': text, 'expected': expected_current})
+    if replaced == 'changed':
+        raise HelperError('检测到编辑器内容发生变化，已停止处理并保留当前正文；请检查后重试。')
+    if replaced != 'written':  # 守卫丢失或用户已操作时没有执行替换。
+        return False
     _remove_extra_leading_newlines(page, text)  # 清理可能由编辑器额外插入的前导换行。
     return True  # 调用者仍会等待和验证正文。
 
@@ -320,7 +327,8 @@ def _remove_extra_leading_newlines(page, text: str) -> None:
     # 若仅有额外前导换行，则统计数量，遍历文本节点并用 Range 圈出这部分。
     # 遍历途中如发现其他字符或节点不完整就退出；确认范围后才执行删除。
     page.locator(EDITOR_SELECTOR).evaluate(r'''(editor, expected) => {
-        if (window.__csdnMdHelperGuard?.interacted) return;
+        const guard = window.__csdnMdHelperGuard;
+        if (!guard || guard.interacted) return;
         const normalize = value => value.replace(/\r\n/g, '\n').replace(/\n+$/, '');
         const current = editor.textContent || '';
         if (normalize(current) === normalize(expected)) return;
@@ -356,30 +364,286 @@ def _equivalent_editor_text(actual: str, expected: str) -> bool:
     return actual.replace('\r\n', '\n').rstrip('\n') == expected.replace('\r\n', '\n').rstrip('\n')
 
 
-def _wait_for_text(page, expected: str, timeout_ms: int = 5000) -> bool:
+def _small_text_patches(before: str, after: str) -> list[dict] | None:
+    # 作用：计算把旧正文变成新正文的逐行小范围替换。
+    # 使用场景：同一张图可能被多行引用；不能用带换行的一大段插入破坏编辑器布局。
+    old_lines = before.splitlines(keepends=True)
+    new_lines = after.splitlines(keepends=True)
+    if len(old_lines) != len(new_lines):
+        return None  # 行数改变时无法确认只修改了图片引用。
+
+    def shared_length(left: str, right: str, limit: int, *, suffix: bool = False) -> int:
+        # 作用：查找一行中不需要修改的公共前缀或后缀长度。
+        # 使用场景：把每行的变更缩小到最短连续区间。
+        low, high = 0, limit
+        while low < high:
+            middle = (low + high + 1) // 2
+            same = left[-middle:] == right[-middle:] if suffix else left[:middle] == right[:middle]
+            if same:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    patches = []
+    offset = 0  # 当前行在 Python 字符串中的起点。
+    limit = max(4096, min(65536, len(before) // 3))
+    for old_line, new_line in zip(old_lines, new_lines):
+        if old_line != new_line:
+            prefix = shared_length(old_line, new_line, min(len(old_line), len(new_line)))
+            suffix = shared_length(old_line, new_line, min(len(old_line), len(new_line)) - prefix,
+                                   suffix=True)
+            old_part = old_line[prefix:len(old_line) - suffix]
+            new_part = new_line[prefix:len(new_line) - suffix]
+            # 验证每个局部区间确实能重建目标行，供浏览器复用目标正文而不反复传输全文。
+            if old_line[:prefix] + new_part + old_line[len(old_line) - suffix:] != new_line:
+                return None
+            # insertText 跨行时可能产生额外 DOM 节点并丢失换行；跨度过大也不适合局部操作。
+            if ('\n' in old_part or '\r' in old_part or '\n' in new_part or '\r' in new_part or
+                    max(len(old_part), len(new_part)) > limit):
+                return None
+            # DOM Range 使用 UTF-16 偏移；Python 字符坐标遇到 emoji 时不能直接传入浏览器。
+            start = len(before[:offset + prefix].encode('utf-16-le')) // 2
+            end = start + len(old_part.encode('utf-16-le')) // 2
+            patches.append({'start': start, 'end': end, 'old': old_part, 'replacement': new_part})
+            if len(patches) > 32:
+                return None  # 太多独立修改时使用成熟的全文写回路径。
+        offset += len(old_line)
+    return list(reversed(patches))  # 从后向前修改，前面的位置不会因后续替换而偏移。
+
+
+def _try_local_image_update(page, before: str, updated: str, url: str) -> dict:
+    # 作用：识别本次临时插图并尝试局部更新正文，返回处理状态。
+    # 使用场景：图片上传成功后调用；无法明确识别变化时不覆盖当前编辑器内容。
+    # 内容不同时仍先检查上传插入的图片；跨度过大时由调用方安全回退到全文写入。
+    patches = _small_text_patches(before, updated)
+    return page.locator(EDITOR_SELECTOR).evaluate(r'''(editor, data) => {
+        const guard = window.__csdnMdHelperGuard;
+        if (!guard) return {status: 'unavailable'};
+        if (guard.interacted) return {status: 'interacted'};
+        const current = editor.textContent || '';
+        const before = guard.uploadSnapshot;
+        if (typeof before !== 'string') return {status: 'unavailable'};
+        const url = data.url;
+        const marker = '](' + url + ')';
+
+        // 只接受由本次上传地址组成的一条 Markdown 图片，其他变化一律不猜测。
+        const isSingleImage = value => {
+            const text = value.trim();
+            const end = text.lastIndexOf(marker);
+            return text.startsWith('![') && end >= 2 && end + marker.length === text.length &&
+                   !/[\r\n]/.test(text.slice(0, end)) && text.indexOf('](') === end;
+        };
+
+        // 有些编辑器会暂时只剩上传插图；它是已知状态，可以安全回退全文写入。
+        if (isSingleImage(current)) return {status: 'fallback', reason: 'editor-replaced-body', snapshot: current};
+
+        // 查找能被移除且余下正文恰好等于上传前快照的一段临时插图。
+        const added = current.length - before.length;
+        let insertion = null;
+        if (added > 0) {
+            let search = 0;
+            while (search < current.length) {
+                const markerAt = current.indexOf(marker, search);
+                if (markerAt < 0) break;
+                const imageAt = current.lastIndexOf('![', markerAt);
+                const imageEnd = markerAt + marker.length;
+                if (imageAt >= 0 && isSingleImage(current.slice(imageAt, imageEnd))) {
+                    const whitespace = added - (imageEnd - imageAt);
+                    // 允许临时插图相邻的少量空白，但不把正文一并删除。
+                    if (whitespace >= 0 && whitespace <= 256) {
+                        for (let left = 0; left <= whitespace; left++) {
+                            const start = imageAt - left;
+                            const end = imageEnd + whitespace - left;
+                            if (start < 0 || end > current.length) continue;
+                            if (!/^\s*$/.test(current.slice(start, imageAt)) ||
+                                !/^\s*$/.test(current.slice(imageEnd, end))) continue;
+                            if (current.slice(0, start) === before.slice(0, start) &&
+                                current.slice(end) === before.slice(start)) {
+                                insertion = {start, end};
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (insertion) break;
+                search = markerAt + marker.length;
+            }
+        }
+        // 除本次插图之外有无法确认的变化：停止，不用全文回退覆盖它。
+        if (!insertion) return {status: 'conflict', reason: 'unrecognized-insertion'};
+        if (data.patches === null) return {status: 'fallback', reason: 'patch-too-large', snapshot: current};
+
+        // 先在字符串中演算所有修改，确认每处旧内容和完整目标均吻合。
+        const states = [before];
+        for (const part of data.patches) {
+            const previous = states[states.length - 1];
+            if (previous.slice(part.start, part.end) !== part.old) {
+                return {status: 'fallback', reason: 'patch-old-text-mismatch', snapshot: current};
+            }
+            states.push(previous.slice(0, part.start) + part.replacement + previous.slice(part.end));
+        }
+        // textContent 和 DOM 文本节点都以 UTF-16 计数，遍历节点定位选择区间。
+        const pointAt = offset => {
+            const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+            let node, remaining = offset;
+            while ((node = walker.nextNode())) {
+                if (!node.data.length) continue;
+                if (remaining <= node.data.length) return {node, offset: remaining};
+                remaining -= node.data.length;
+            }
+            return null;
+        };
+        const changeRange = (start, end, replacement) => {
+            const first = pointAt(start), last = pointAt(end);
+            if (!first || !last) return false;
+            const range = document.createRange();
+            range.setStart(first.node, first.offset);
+            range.setEnd(last.node, last.offset);
+            editor.focus();
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return replacement === null ? document.execCommand('delete') :
+                   document.execCommand('insertText', false, replacement);
+        };
+
+        // 末尾空行不影响图片在前文的偏移；行内 CRLF 变化则会改变偏移，不能继续局部编辑。
+        const normalize = value => value.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+        const sameText = (actual, expected) => actual.replace(/\n+$/, '') === expected.replace(/\n+$/, '');
+        const equivalent = (actual, expected) => normalize(actual) === normalize(expected);
+        // 只在去除前缀后其余正文完全一致时，才把开头换行认作编辑器新增的换行。
+        const extraLeadingNewlines = (actual, expected, compare = sameText) => {
+            let extra = 0;
+            while (actual[extra] === '\n') {
+                extra++;
+                if (compare(actual.slice(extra), expected)) return extra;
+            }
+            return 0;
+        };
+        const removeLeadingNewlines = count => {
+            // 用原生删除命令清理时，部分 CSDN 编辑器会再次添加同样的前导换行。
+            // 仅删除已经逐字符确认的额外换行，再通知编辑器同步内容。
+            const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+            const range = document.createRange();
+            let node, first = true, remaining = count;
+            while ((node = walker.nextNode()) && remaining) {
+                if (!node.data.length) continue;
+                const take = Math.min(remaining, node.data.length);
+                if (node.data.slice(0, take) !== '\n'.repeat(take)) return false;
+                if (first) { range.setStart(node, 0); first = false; }
+                remaining -= take;
+                if (!remaining) range.setEnd(node, take);
+            }
+            if (remaining) return false;
+            range.deleteContents();
+            editor.dispatchEvent(new InputEvent('input', {
+                bubbles: true, inputType: 'deleteContentBackward'
+            }));
+            return true;
+        };
+        const restoreKnownText = expected => {
+            for (let attempt = 0; attempt < 2; attempt++) {
+                const actual = editor.textContent || '';
+                if (sameText(actual, expected)) return true;
+                const extra = extraLeadingNewlines(actual, expected);
+                if (guard.interacted || !extra) return false;
+                if (!removeLeadingNewlines(extra)) return false;
+            }
+            return sameText(editor.textContent || '', expected);
+        };
+
+        // 先移除上传产生的临时插图；每一步失败后都只在已知状态下允许回退。
+        const removed = changeRange(insertion.start, insertion.end, null);
+        let observed = editor.textContent || '';
+        if (guard.interacted) return {status: 'interacted'};
+        if (!removed || !restoreKnownText(before)) {
+            observed = editor.textContent || '';
+            if (observed === current || equivalent(observed, before) ||
+                extraLeadingNewlines(observed, before, equivalent)) {
+                return {status: 'fallback', reason: 'insertion-removal-not-stable', snapshot: observed};
+            }
+            return {status: 'conflict', reason: 'unexpected-after-removing-insertion'};
+        }
+        for (let index = 0; index < data.patches.length; index++) {
+            if (guard.interacted) return {status: 'interacted'};
+            const part = data.patches[index];
+            const inserted = changeRange(part.start, part.end, part.replacement);
+            observed = editor.textContent || '';
+            if (guard.interacted) return {status: 'interacted'};
+            if (!inserted || !restoreKnownText(states[index + 1])) {
+                observed = editor.textContent || '';
+                // 仅当当前正文仍是预先验证过的某一步，才允许兼容写回。
+                if (observed === current || states.some(state =>
+                    equivalent(observed, state) || extraLeadingNewlines(observed, state, equivalent))) {
+                    return {status: 'fallback', reason: 'local-edit-not-stable', snapshot: observed};
+                }
+                return {status: 'conflict', reason: 'unexpected-after-local-edit', index};
+            }
+        }
+        // 此正文由已核验的上传前快照和局部补丁生成，供后续稳定性检查直接复用。
+        guard.localTarget = states[states.length - 1];
+        return {status: 'applied'};
+    }''', {'url': url, 'patches': patches})
+
+
+def _wait_for_text(page, expected: str, timeout_ms: int = 5000, *, use_local_target: bool = False,
+                   require_guard: bool = False) -> bool:
     # 作用：等待编辑器内容与目标匹配并保持短暂稳定。
     # 使用场景：每次写入或恢复正文后使用；超时返回 False。
     # 页面可能异步修改正文：匹配后仍需稳定 0.3 秒才认为写入成功。
-    deadline = time.monotonic() + timeout_ms / 1000  # 把毫秒超时转为单调时钟的截止时间。
-    matching_since = None  # 首次匹配的时间；正文再次变化时会重置。
-    while time.monotonic() < deadline:
-        actual = editor_text(page)  # 每轮重新读取，观察页面异步渲染是否完成。
-        if _equivalent_editor_text(actual, expected):
-            if matching_since is None:  # 第一次观察到匹配。
-                matching_since = time.monotonic()  # 首次匹配，开始计算稳定时间。
-            elif time.monotonic() - matching_since >= 0.3:
-                return True  # 连续匹配至少 0.3 秒，确认写入稳定。
-        else:
-            matching_since = None  # 再次不匹配时必须重新计算稳定时间。
-            # 渲染后也可能延迟插入额外换行；只修正可确认的前缀差异。
-            normalized_actual = actual.replace('\r\n', '\n').rstrip('\n')  # 规范化当前正文。
-            normalized_expected = expected.replace('\r\n', '\n').rstrip('\n')  # 规范化期望正文。
-            extra = len(normalized_actual) - len(normalized_expected)  # 差出的字符数可能是额外换行。
-            if (extra > 0 and normalized_actual[:extra] == '\n' * extra
-                    and normalized_actual[extra:] == normalized_expected):
-                _remove_extra_leading_newlines(page, expected)  # 仅前缀全为换行且其余匹配时尝试删除。
-        page.wait_for_timeout(150)  # 等待页面继续处理，避免无间隔地反复查询。
-    return False  # 到达截止时间仍未确认稳定匹配。
+    # 期望正文只传入页面一次，后续比较仅返回状态，避免反复把长文传回 Python。
+    key = '__csdnMdHelperExpected_' + uuid4().hex
+    if use_local_target:
+        # 局部替换已经在页面中构造并验证目标正文，不必再次传输完整文章。
+        page.evaluate(r'''(key) => {
+            const text = window.__csdnMdHelperGuard?.localTarget;
+            if (typeof text === 'string') window[key] = text.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+        }''', key)
+    else:
+        page.evaluate(r'''({key, text}) => {
+            window[key] = text.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+        }''', {'key': key, 'text': expected})
+    deadline = time.monotonic() + timeout_ms / 1000
+    matching_since = None
+    try:
+        while time.monotonic() < deadline:
+            state = page.locator(EDITOR_SELECTOR).evaluate(r'''(editor, data) => {
+                const guard = window.__csdnMdHelperGuard;
+                if (data.requireGuard && !guard) return 'guard-missing';
+                if (guard?.interacted) return 'interacted';
+                const key = data.key;
+                if (typeof window[key] !== 'string') return 'missing';
+                const actual = (editor.textContent || '').replace(/\r\n/g, '\n').replace(/\n+$/, '');
+                const target = window[key];
+                if (actual === target) return 'match';
+                const extra = actual.length - target.length;
+                if (extra > 0 && actual.slice(0, extra) === '\n'.repeat(extra) &&
+                    actual.slice(extra) === target) return 'extra-newlines';
+                return 'different';
+            }''', {'key': key, 'requireGuard': require_guard})
+            if state == 'guard-missing':
+                raise HelperError('编辑页面状态已重置，已停止处理；请检查正文后重试。')
+            if state == 'interacted':
+                raise HelperError('检测到你操作了编辑页面，已停止处理以保护正文；请检查后重试。')
+            if state == 'missing':
+                return False  # 页面被重新加载后，不能把旧状态当成写入成功。
+            if state == 'match':
+                if matching_since is None:
+                    matching_since = time.monotonic()
+                elif time.monotonic() - matching_since >= 0.3:
+                    return True
+            else:
+                matching_since = None
+                if state == 'extra-newlines':
+                    _remove_extra_leading_newlines(page, expected)
+            page.wait_for_timeout(150)
+        return False
+    finally:
+        try:
+            page.evaluate('(key) => { delete window[key]; }', key)  # 不在编辑页面留下正文副本。
+        except Exception:
+            pass  # 页面已经关闭时不遮盖原来的处理结果。
 
 
 def _start_edit_guard(page) -> None:
@@ -400,10 +664,13 @@ def _start_edit_guard(page) -> None:
     }''')
 
 
-def _user_interacted(page) -> bool:
-    # 作用：读取页面中是否已有可信用户交互。
-    # 使用场景：写入及上传过程中的安全检查会调用。
-    return bool(page.evaluate('() => !!window.__csdnMdHelperGuard?.interacted'))  # 读取标志并转为布尔值。
+def _user_interacted(page) -> bool | None:
+    # 作用：读取是否已有可信用户交互；守卫丢失时返回 None。
+    # 使用场景：写入及上传过程中的安全检查会调用，也能识别页面刷新。
+    return page.evaluate('''() => {
+        const guard = window.__csdnMdHelperGuard;
+        return guard ? !!guard.interacted : null;
+    }''')
 
 
 def _stop_edit_guard(page) -> None:
@@ -422,13 +689,27 @@ def _stop_edit_guard(page) -> None:
         pass  # 页面已关闭等情况下，清理失败不应掩盖原来的错误。
 
 
-def _ensure_editor_unchanged(page, expected: str | None = None) -> None:
+def _ensure_editor_unchanged(page, expected: str | None = None, *, use_local_target: bool = False) -> str | None:
     # 作用：检查用户交互、其他编辑标签和可选正文快照。
     # 使用场景：重要写入前后调用；发现风险时抛出 HelperError。
     # 同时检查用户交互、其他编辑标签和正文快照，发现变化立即停止。
-    if expected is not None and not _equivalent_editor_text(editor_text(page), expected):
+    actual = editor_text(page) if expected is not None else None  # 调用者需要时返回精确正文。
+    if use_local_target:
+        # 局部更新后的目标已留在守卫中；在页面内比较，只返回检查结果。
+        matched = page.locator(EDITOR_SELECTOR).evaluate(r'''editor => {
+            const target = window.__csdnMdHelperGuard?.localTarget;
+            if (typeof target !== 'string') return false;
+            const normalize = value => value.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+            return normalize(editor.textContent || '') === normalize(target);
+        }''')
+    else:
+        matched = expected is None or _equivalent_editor_text(actual, expected)
+    if not matched:
         raise HelperError('检测到编辑器内容发生变化，已停止处理并保留当前正文；请检查后重试。')
-    if _user_interacted(page):  # 即使正文暂未变化，也不能假设用户的后续操作不会修改文章。
+    interacted = _user_interacted(page)
+    if interacted is None:  # 页面刷新会清除守卫，不能再用旧状态恢复正文。
+        raise HelperError('编辑页面状态已重置，已停止处理；请检查正文后重试。')
+    if interacted:  # 即使正文暂未变化，也不能假设用户的后续操作不会修改文章。
         raise HelperError('检测到你操作了编辑页面，已停止处理以保护正文；请检查后重试。')
     # 查找除当前页外仍打开的 CSDN Markdown 编辑标签。
     others = [other for other in page.context.pages
@@ -436,18 +717,41 @@ def _ensure_editor_unchanged(page, expected: str | None = None) -> None:
     if others:  # 其他标签可能同步草稿，停止以保护当前内容。
         raise HelperError('检测到其他 CSDN Markdown 编辑标签页，已停止处理并保留当前正文；'
                           '请关闭其他标签页后重试。')
+    return actual  # 调用者需要时复用刚检查的正文，避免重复传输全文。
 
 
-def _write_verified(page, text: str, previous: str, backup_path: Path | None) -> None:
+def _capture_upload_snapshot(page, expected: str) -> str:
+    # 作用：原子读取并缓存上传前正文，再核对预期内容和编辑器安全状态。
+    # 使用场景：每次粘贴图片前调用；后续浏览器内比较复用该快照。
+    actual = page.locator(EDITOR_SELECTOR).evaluate('''editor => {
+        const guard = window.__csdnMdHelperGuard;
+        if (!guard) return null;
+        const text = editor.textContent || '';
+        if (!guard.interacted) {
+            guard.uploadSnapshot = text;
+            delete guard.localTarget;
+        }
+        return text;
+    }''')
+    if actual is None:
+        raise HelperError('编辑页面状态已重置，已停止处理；请检查正文后重试。')
+    if not _equivalent_editor_text(actual, expected):
+        raise HelperError('检测到编辑器内容发生变化，已停止处理并保留当前正文；请检查后重试。')
+    _ensure_editor_unchanged(page)  # 缓存后仍需检查用户交互及其他编辑标签。
+    return actual
+
+
+def _write_verified(page, text: str, previous: str, backup_path: Path | None,
+                    *, expected_current: str | None = None) -> None:
     # 作用：写入并验证正文，验证失败时尝试恢复上一步正文。
     # 使用场景：导入、替换及失败恢复时使用；previous 是回退目标。
     # 每次写入后重新读取并等待稳定；无法确认时尝试恢复上一步正文。
     # 若检测到用户正在操作则停止，不继续覆盖；备份路径仅在已创建时提供。
-    _ensure_editor_unchanged(page)  # 写入前先排除用户操作和多标签冲突。
+    _ensure_editor_unchanged(page, expected_current)  # 回退写入前也要确认已知快照仍未变化。
     try:
-        if not _replace_editor_text(page, text):  # 写入时又发现用户操作。
-            raise HelperError('检测到你操作了编辑页面，已停止处理以保护正文；请检查后重试。')
-        written = _wait_for_text(page, text)  # 等待实际正文与目标匹配并稳定。
+        if not _replace_editor_text(page, text, expected_current=expected_current):  # 写入时再次核对快照。
+            raise HelperError('编辑页面状态发生变化，已停止处理；请检查正文后重试。')
+        written = _wait_for_text(page, text, require_guard=True)  # 等待实际正文与目标匹配并稳定。
     except HelperError:
         raise  # 保护性错误直接向上传递，不尝试继续覆盖。
     except Exception:
@@ -456,7 +760,7 @@ def _write_verified(page, text: str, previous: str, backup_path: Path | None) ->
         return  # 写入已确认，无需恢复。
     _ensure_editor_unchanged(page)  # 尝试恢复前再次确认没有新的用户操作。
     try:
-        restored = _replace_editor_text(page, previous) and _wait_for_text(page, previous)  # 恢复并核验。
+        restored = _replace_editor_text(page, previous) and _wait_for_text(page, previous, require_guard=True)
     except Exception:
         restored = False  # 恢复过程异常时如实报告无法确认。
     note = '已尝试恢复上一步正文。' if restored else '未能确认正文恢复成功。'
@@ -465,13 +769,54 @@ def _write_verified(page, text: str, previous: str, backup_path: Path | None) ->
     raise HelperError(f'CSDN 编辑器未确认写入结果，{note}')
 
 
+def _write_image_verified(page, previous: str, updated: str, before_upload: str,
+                          url: str, backup_path: Path | None) -> bool:
+    # 作用：优先局部更新图片引用；只有编辑器处于已知状态时才回退全文写入。
+    # 使用场景：一张图片上传成功、已经取得网址后调用；返回是否使用局部更新。
+    try:
+        result = _try_local_image_update(page, before_upload, updated, url)
+    except Exception as exc:
+        # 页面关闭或脚本异常时不能猜测当前正文，更不能盲目覆盖。
+        raise HelperError('无法确认编辑器当前状态，已停止处理；请检查正文后重试。') from exc
+    status = result.get('status') if isinstance(result, dict) else None
+    if status == 'interacted':
+        backup_note = f' 本地备份：{backup_path}' if backup_path else ''
+        raise HelperError('检测到你操作了编辑页面，已停止处理；处理过程可能已部分修改正文，'
+                          '请检查后重试。' + backup_note)
+    if status == 'unavailable':
+        raise HelperError('编辑器状态已重置，已停止处理；请检查正文后重试。')
+    if status == 'fallback':
+        # 对已识别的插图状态重新核验快照，防止判断和写入之间出现其他变化。
+        snapshot = result.get('snapshot')
+        if not isinstance(snapshot, str):
+            raise HelperError('无法确认编辑器回退状态，已停止处理；请检查正文后重试。')
+        _write_verified(page, updated, previous, backup_path, expected_current=snapshot)
+        return False
+    if status == 'applied':
+        # 局部操作仍需验证完整正文和稳定时间，不能只看浏览器命令的返回值。
+        if _wait_for_text(page, updated, use_local_target=True, require_guard=True):
+            _ensure_editor_unchanged(page, use_local_target=True)
+            return True
+        _ensure_editor_unchanged(page)
+        current = editor_text(page)
+        if current == before_upload:
+            # 若局部操作没有生效且正文回到上传前快照，可以使用原有全文写回。
+            _write_verified(page, updated, previous, backup_path, expected_current=current)
+            return False
+    # 用户编辑或不明变化可能包含需要保留的内容，不能用旧快照覆盖。
+    backup_note = f' 本地备份：{backup_path}' if backup_path else ''
+    raise HelperError('上传后编辑器出现无法确认的变化，已停止处理；本次操作可能已部分修改正文，'
+                      '图片也可能已经上传，请检查后重试。' + backup_note)
+
+
 def upload_one(page, path: Path, pending: deque, current_requests: set, *, timeout_ms: int = 60_000,
-               extra_hosts: set[str] | None = None, notify=lambda message: None) -> str:
+               extra_hosts: set[str] | None = None, notify=lambda message: None,
+               editor_before: str | None = None, snapshot_captured: bool = False) -> str:
     # 作用：上传一张本地图片并获取已插入正文的 CSDN 地址。
     # 使用场景：逐张处理图片时调用；pending 与 current_requests 由网络监听器维护。
     # 清空上一张图的请求记录，粘贴文件后等待本次可信上传响应。
     extra_hosts = extra_hosts or set()  # 未指定额外域名时使用空集合。
-    before = editor_text(page)  # 记录上传前正文，用于确认图片插入产生了变化。
+    before = editor_before if editor_before is not None else editor_text(page)  # 复用已核验的上传前正文。
     pending.clear()  # 丢弃上一张图片尚未消费的响应。
     current_requests.clear()  # 丢弃上一张图片的请求记录。
     _paste_file(page, path)  # 由 CSDN 编辑器接管文件粘贴并发起上传。
@@ -496,8 +841,26 @@ def upload_one(page, path: Path, pending: deque, current_requests: set, *, timeo
                     # 防止编辑器的延迟插入覆盖接下来重建的文章。
                     insertion_deadline = time.monotonic() + min(timeout_ms / 1000, 10)  # 最多额外等 10 秒。
                     while time.monotonic() < insertion_deadline:
-                        current = editor_text(page)  # 检查网页是否已经把地址插入编辑器。
-                        if url in current and (url not in before or current != before):
+                        if snapshot_captured:
+                            # 在浏览器内用上传前快照比较，只返回状态，不反复传输整篇正文。
+                            inserted = page.locator(EDITOR_SELECTOR).evaluate('''(editor, url) => {
+                                const guard = window.__csdnMdHelperGuard;
+                                if (!guard || typeof guard.uploadSnapshot !== 'string') return 'missing';
+                                if (guard.interacted) return 'interacted';
+                                const current = editor.textContent || '';
+                                return current.includes(url) &&
+                                    (!guard.uploadSnapshot.includes(url) || current !== guard.uploadSnapshot)
+                                    ? 'yes' : 'no';
+                            }''', url)
+                            if inserted == 'missing':
+                                raise HelperError('编辑器状态已重置，已停止处理；请检查正文后重试。')
+                            if inserted == 'interacted':
+                                raise HelperError('检测到你操作了编辑页面，已停止处理；请检查正文后重试。')
+                            found = inserted == 'yes'
+                        else:
+                            current = editor_text(page)  # 未缓存快照时沿用兼容路径。
+                            found = url in current and (url not in before or current != before)
+                        if found:
                             return url  # 地址出现且可确认是本轮插入，才返回。
                         page.wait_for_timeout(120)  # 未插入时继续等待页面更新。
                     raise HelperError(f'图片已上传，但未能确认 CSDN 完成插入：{path.name}')
@@ -574,12 +937,14 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
         # 导入时先写完整正文；缺图的错误随后报告，已导入的文字仍会保留。
         if imported:  # 导入模式先将保护后的完整正文写入编辑器。
             notify('正在导入完整 Markdown 正文。')
-            _write_verified(target, working, safe_before, backup_path)  # 写入后验证，失败尝试恢复旧正文。
+            _write_verified(target, working, safe_before, backup_path,
+                            expected_current=before)  # 核对处理前正文，再写入并验证。
             notify('正文已导入，开始处理图片。')
         elif working != before and not missing:  # 修复模式下有可保护的图片且没有缺图。
             # 修复模式下，仅在有变化且没有缺图时先保护现有本地图片。
             notify('正在保护尚未上传的本地图片链接。')
-            _write_verified(target, working, safe_before, backup_path)  # 先把受保护的正文写回编辑器。
+            _write_verified(target, working, safe_before, backup_path,
+                            expected_current=before)  # 核对原正文后写入保护标记。
 
         if missing:  # 任何本地图片缺失时，在开始上传前停止。
             sample = '\n'.join(str(path) for path in missing[:10])  # 错误提示最多展示前 10 个路径。
@@ -600,14 +965,16 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
         # 一张文件只上传一次，再把返回的地址应用到它的全部引用。
         # 每轮都以原文和累计结果重新生成正文，避免替换后字符位置偏移。
         replacements = []  # 逐步累计每处图片引用与上传地址的对应关系。
+        fallback_notified = False  # 同一篇文章的兼容回退提示只显示一次。
         for index, (path, refs) in enumerate(refs_by_path.items(), 1):
             _check_cancelled(cancel_event, index - 1, count)  # 两张图片之间是安全停止点。
             notify(f'正在上传 {index}/{count}：{path.name}')  # 向界面显示当前进度。
             _check_cancelled(cancel_event, index - 1, count)  # 避免通知与粘贴之间错过停止请求。
-            _ensure_editor_unchanged(target, working)  # 上传前确认正文仍是上一轮的结果。
+            before_upload = _capture_upload_snapshot(target, working)  # 同步缓存精确快照供后续核验。
             try:  # 单张图片失败时保留前面已完成的结果。
                 url = upload_one(target, path, pending, current_requests,
-                                 timeout_ms=timeout_ms, extra_hosts=extra_hosts, notify=notify)
+                                 timeout_ms=timeout_ms, extra_hosts=extra_hosts, notify=notify,
+                                 editor_before=before_upload, snapshot_captured=True)
             except Exception as exc:
                 # 未检测到用户新操作时，恢复上一轮正文并保留已完成的图片。
                 _ensure_editor_unchanged(target)  # 若用户已操作则直接停止，不再恢复覆盖。
@@ -617,7 +984,10 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
             _ensure_editor_unchanged(target)  # 上传期间再次检查用户是否操作或打开其他标签。
             replacements.extend((ref, url) for ref in refs)  # 该文件的所有引用共用同一个上传地址。
             updated = render_image_progress(body, local_refs, replacements)  # 根据原文和累计结果重建全文。
-            _write_verified(target, updated, working, backup_path)  # 验证写入；失败可回退上一轮。
+            used_local = _write_image_verified(target, working, updated, before_upload, url, backup_path)
+            if not used_local and not fallback_notified:
+                notify('当前编辑器需要兼容写回，正在保护正文。')
+                fallback_notified = True
             working = updated  # 本轮成功后，更新下一轮要保护的正文快照。
             notify(f'已替换 {index}/{count} 张图片的链接。')
         return ProcessResult(count, occurrences, imported, backup_path)  # 返回统计信息供界面显示。
