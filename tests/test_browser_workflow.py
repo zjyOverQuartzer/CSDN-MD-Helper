@@ -739,11 +739,14 @@ class BrowserWorkflowTest(unittest.TestCase):
         # 作用：安全停止时保留已完成图片，继续修复时只上传剩余图片。
         # 使用场景：用户在多图处理过程中点击停止按钮。
         cancelled = threading.Event()
+        states = []
         def stop_after_first(message):
             if message.startswith('已替换 1/2'):
                 cancelled.set()
         with self.assertRaisesRegex(csdn_browser.ProcessingCancelled, '已完成 1/2'):
-            self.run_process(stop_after_first, mode='import', cancel_event=cancelled)
+            self.run_process(stop_after_first, mode='import', cancel_event=cancelled,
+                             image_status=lambda path, state, reason: states.append((path.name, state)))
+        self.assertEqual(states, [('图片 一.png', '上传中'), ('图片 一.png', '已上传并替换')])
         partial = editor_text(self.target)
         self.assertIn('![一](https://i-blog.csdnimg.cn/mock-1.png)', partial)
         self.assertEqual(TestServer.uploads, [b'fake-image-A'])
@@ -893,6 +896,40 @@ class BrowserWorkflowTest(unittest.TestCase):
             self.run_process(mode='import', expected_markdown=text, expected_preflight=plan)
         self.assertEqual(editor_text(self.target), '原有正文')
         self.assertEqual(TestServer.uploads, [])
+
+    def test_image_status_keeps_success_and_confirmed_failure_separate(self):
+        # 作用：第一张确认成功、第二张被服务器拒绝时，分别报告真实状态。
+        # 使用场景：多图上传部分完成后，需要知道哪些图片仍需处理。
+        TestServer.fail_indices = {2}
+        self.target.evaluate('() => { window.uploadAsBytes = true; }')  # 让浏览器暴露请求体，确认失败归属。
+        states = []
+        with self.assertRaises(HelperError):
+            self.run_process(mode='import', image_status=lambda path, state, reason: states.append(
+                (path.name, state, reason)))
+        self.assertEqual([(name, state) for name, state, _ in states], [
+            ('图片 一.png', '上传中'), ('图片 一.png', '已上传并替换'),
+            ('two.png', '上传中'), ('two.png', '处理失败')])
+        self.assertIn('HTTP 503', states[-1][2])
+
+    def test_image_status_reports_uncertain_upload_or_unverified_write(self):
+        # 作用：网络结果不确定或上传后写回失败时，不把图片标记为成功。
+        # 使用场景：提醒用户先检查 CSDN，避免把尚未确认的结果当作失败重传。
+        states = []
+        with patch.object(csdn_browser, 'upload_one', side_effect=HelperError('网络结果未知')):
+            with self.assertRaises(HelperError):
+                self.run_process(mode='import', image_status=lambda path, state, reason: states.append((state, reason)))
+        self.assertEqual([state for state, _ in states], ['上传中', '上传结果待确认'])
+        self.assertIn('网络结果未知', states[-1][1])
+
+        self.fill_target('')
+        states.clear()
+        with patch.object(csdn_browser, '_write_image_verified', side_effect=HelperError('无法确认写入')):
+            with self.assertRaises(HelperError):
+                self.run_process(mode='import', image_status=lambda path, state, reason: states.append((state, reason)))
+        self.assertEqual([state for state, _ in states], ['上传中', '上传结果待确认'])
+        self.assertIn('图片已上传', states[-1][1])
+
+
 
 if __name__ == '__main__':
     unittest.main()  # 直接运行该文件时执行其中的测试。

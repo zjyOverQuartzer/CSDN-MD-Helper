@@ -40,6 +40,12 @@ class ProcessingCancelled(HelperError):
     pass
 
 
+class ConfirmedUploadFailure(HelperError):
+    # 作用：区分已确认的图片请求失败和无法确认结果的上传异常。
+    # 使用场景：服务器明确拒绝当前图片时，让界面显示失败而不是误报成功。
+    pass
+
+
 @dataclass(frozen=True)
 class PreflightImage:
     # 作用：保存一张本地图片的路径、所有引用行号和缺失状态。
@@ -882,7 +888,7 @@ def upload_one(page, path: Path, pending: deque, current_requests: set, *, timeo
             if _response_may_contain_upload(response, extra_hosts):  # 先检查域名和方法。
                 if not response.ok:
                     if 400 <= response.status <= 599 and _request_contains_image(response.request, path):
-                        raise HelperError(_http_upload_error(response.status, path))
+                        raise ConfirmedUploadFailure(_http_upload_error(response.status, path))
                     if (400 <= response.status <= 599 and possible_failure is None
                             and _request_may_contain_image(response.request, path)):
                         possible_failure = response.status
@@ -928,7 +934,8 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
                     expected_before: str | None = None,
                     backup_existing: bool = True, cancel_event=None,
                     expected_markdown: str | None = None,
-                    expected_preflight: ImagePreflight | None = None) -> ProcessResult:
+                    expected_preflight: ImagePreflight | None = None,
+                    image_status=lambda path, status, reason: None) -> ProcessResult:
     # 作用：组织正文导入、图片保护、上传、逐步替换和资源清理。
     # 使用场景：界面要求导入文档或修复现有正文时调用；成功返回 ProcessResult。
     # 参数：target 是目标编辑页；markdown_path 决定文档和图片的相对路径基准。
@@ -1028,11 +1035,18 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
             notify(f'正在上传 {index}/{count}：{path.name}')  # 向界面显示当前进度。
             _check_cancelled(cancel_event, index - 1, count)  # 避免通知与粘贴之间错过停止请求。
             before_upload = _capture_upload_snapshot(target, working)  # 同步缓存精确快照供后续核验。
+            image_status(path, '上传中', '')  # 只有即将开始上传，才改变这张图片的状态。
             try:  # 单张图片失败时保留前面已完成的结果。
                 url = upload_one(target, path, pending, current_requests,
                                  timeout_ms=timeout_ms, extra_hosts=extra_hosts, notify=notify,
                                  editor_before=before_upload, snapshot_captured=True)
             except Exception as exc:
+                # 只有匹配到当前图片的失败响应才能确定失败；超时或页面异常可能已上传。
+                state = '处理失败' if isinstance(exc, ConfirmedUploadFailure) else '上传结果待确认'
+                reason = str(exc)
+                if state == '上传结果待确认':
+                    reason += '\n图片可能已上传，请先检查 CSDN 正文，避免重复上传。'
+                image_status(path, state, reason)
                 # 上传失败后先检查正文；出现无法确认的变化时保留当前内容，不能盲目写回旧快照。
                 _ensure_editor_unchanged(target)  # 守卫丢失或用户已操作时直接停止。
                 current = editor_text(target)
@@ -1041,14 +1055,21 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
                                       f'已完成 {index - 1}/{count} 张图片。{exc}\n请检查正文和图片后再重试。') from exc
                 raise HelperError(f'正文已保留，已完成 {index - 1}/{count} 张图片。{exc}\n'
                                   '请检查正文；可选择“仅修复当前正文”继续处理剩余图片。') from exc
-            _ensure_editor_unchanged(target)  # 上传期间再次检查用户是否操作或打开其他标签。
-            replacements.extend((ref, url) for ref in refs)  # 该文件的所有引用共用同一个上传地址。
-            updated = render_image_progress(body, local_refs, replacements)  # 根据原文和累计结果重建全文。
-            used_local = _write_image_verified(target, working, updated, before_upload, url, backup_path)
+            try:
+                _ensure_editor_unchanged(target)  # 上传期间再次检查用户是否操作或打开其他标签。
+                replacements.extend((ref, url) for ref in refs)  # 相同文件的引用共用一个上传地址。
+                updated = render_image_progress(body, local_refs, replacements)  # 按原文及累计结果重建。
+                used_local = _write_image_verified(target, working, updated, before_upload, url, backup_path)
+            except Exception as exc:
+                # 上传成功不等于正文替换已确认；任何写入异常都需要用户先检查。
+                image_status(path, '上传结果待确认', f'图片已上传，但正文替换未确认：{exc}\n'
+                             '请先检查 CSDN 正文，避免重复上传。')
+                raise
             if not used_local and not fallback_notified:
                 notify('当前编辑器需要兼容写回，正在保护正文。')
                 fallback_notified = True
             working = updated  # 本轮成功后，更新下一轮要保护的正文快照。
+            image_status(path, '已上传并替换', '')  # 只有写入核验成功，才显示最终成功。
             notify(f'已替换 {index}/{count} 张图片的链接。')
         return ProcessResult(count, occurrences, imported, backup_path)  # 返回统计信息供界面显示。
     finally:
