@@ -213,6 +213,8 @@ class AppUiTest(unittest.TestCase):
         item = self.window.image_table.tree.get_children()[0]
         self.assertEqual(self.window.image_table.tree.item(item, 'values'), ('missing.png', '2', '图片缺失'))
         self.assertIn(str((path.parent / 'missing.png').resolve()), self.window.image_table.details.get('1.0', 'end'))
+        self.assertEqual([self.window.image_table.count_values[key].get()
+                          for key in ('images', 'references', 'missing')], ['1', '1', '1'])
 
     def test_buttons_submit_selected_options_and_lock_during_work(self):
         # 作用：验证打开浏览器、选择修复模式和取消备份后提交的参数。
@@ -448,6 +450,42 @@ class AppUiTest(unittest.TestCase):
         dialog.after(30, dialog.continue_button.invoke)
         self.assertTrue(dialog.ask())
 
+    def test_record_tabs_and_percentage_keep_existing_results(self):
+        # 作用：验证新版标签按钮、进度百分比和图片结果之间的联动。
+        # 使用场景：用户在处理日志与逐图清单之间反复切换。
+        path = self.make_document()
+        plan = app.image_preflight(path.read_text(encoding='utf-8'), path)
+        self.window.image_table.set_preflight(plan)
+        self.window.progress_value.set(50)
+        self.assertEqual(self.window.progress_percentage.get(), '50%')
+        self.window.results_tab_button.invoke()
+        self.window.update()
+        self.assertEqual(self.window.output_notebook.select(), str(self.window.results_tab))
+        self.assertEqual(len(self.window.image_table.tree.get_children()), 1)
+        self.window.log_tab_button.invoke()
+        self.window.update()
+        self.assertEqual(self.window.output_notebook.select(), str(self.window.log_tab))
+        self.assertIn('原 Markdown 文件不会被改写', self.window.log.get('1.0', 'end'))
+
+    def test_preflight_list_reaches_last_image(self):
+        # 作用：检查图片较多时，用户仍可滚动到并选中清单末尾。
+        # 使用场景：处理多图文档，避免重新设计后只看得到最前几张图片。
+        path = self.make_document()
+        text = '\n'.join(f'![图片{i}](image{i}.png)' for i in range(18))
+        dialog = app.PreflightDialog(self.window, 'import', app.image_preflight(text, path))
+        try:
+            dialog.update()
+            items = dialog.table.tree.get_children()
+            self.assertEqual(len(items), 18)
+            dialog.table.tree.yview_moveto(1)
+            dialog.update()
+            self.assertTrue(dialog.table.tree.bbox(items[-1]))
+            dialog.table.tree.selection_set(items[-1])
+            dialog.table._show_details()
+            self.assertIn('image17.png', dialog.table.details.get('1.0', 'end'))
+        finally:
+            dialog.destroy()
+
 
 class PreflightWorkerTest(unittest.TestCase):
     # 作用：验证后台线程根据处理模式选择正确正文，并等待用户确认。
@@ -626,6 +664,50 @@ class AppUiScalingTest(unittest.TestCase):
             finally:
                 window.close_app()
                 widget = None
+                window = None
+                gc.collect()
+
+    def test_small_preflight_keeps_buttons_visible_and_content_scrollable(self):
+        # 作用：检查高缩放的小窗口中，确认按钮和预检内容都能访问。
+        # 使用场景：检查窗口不足以容纳图片表格与详情时。
+        original = tk.Tk.__init__
+        with patch.object(app, 'BrowserWorker', DummyWorker), \
+                patch.object(tk.Tk, '__init__', hidden_tk_init(original, 2.0)):
+            window = app.Application()
+            try:
+                window.deiconify()
+                window.update()
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / '文章.md'
+                    plan = app.image_preflight('![一](one.png)\n![二](two.png)', path)
+                    dialog = app.PreflightDialog(window, 'import', plan)
+                    try:
+                        dialog.minsize(1, 1)
+                        dialog.geometry('320x480')
+                        dialog.update()
+                        self.assertTrue(dialog._buttons_stacked)
+                        for button in (dialog.cancel_button, dialog.continue_button):
+                            x = button.winfo_rootx() - dialog.winfo_rootx()
+                            y = button.winfo_rooty() - dialog.winfo_rooty()
+                            self.assertGreaterEqual(x, 0)
+                            self.assertGreaterEqual(y, 0)
+                            self.assertLessEqual(x + button.winfo_width(), dialog.winfo_width())
+                            self.assertLessEqual(y + button.winfo_height(), dialog.winfo_height())
+                        self.assertTrue(dialog.content_scrollbar.winfo_ismapped())
+                        dialog.table.tree.yview_moveto(1)
+                        before_scroll = dialog.content_canvas.yview()[0]
+                        self.assertEqual(dialog._scroll_content(SimpleNamespace(widget=dialog.table.tree, delta=-120)),
+                                         'break')
+                        self.assertGreater(dialog.content_canvas.yview()[0], before_scroll)
+                        dialog._reveal_content_focus(SimpleNamespace(widget=dialog.table.tree))
+                        dialog.update()
+                        top = dialog.table.tree.winfo_rooty() - dialog.content_canvas.winfo_rooty()
+                        self.assertGreaterEqual(top, -2)
+                        self.assertLess(top, dialog.content_canvas.winfo_height())
+                    finally:
+                        dialog.destroy()
+            finally:
+                window.close_app()
                 window = None
                 gc.collect()
 

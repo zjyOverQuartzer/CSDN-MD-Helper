@@ -26,17 +26,20 @@ BROWSERS = {'Microsoft Edge': 'msedge', 'Google Chrome': 'chrome'}
 
 # 界面颜色集中定义：白色操作区搭配暖灰进度区，橙色只强调主要操作。
 UI_COLORS = {
-    'page': '#FAF9F8',  # 主页面背景。
+    'page': '#F8F6F4',  # 主页面背景。
     'surface': '#FFFFFF',  # 卡片和标题栏背景。
-    'progress_surface': '#F6F2F0',  # 用轻微的暖色区分进度区域。
-    'border': '#DFDDDB',  # 分区、输入框和分隔线的边框。
+    'progress_surface': '#FFFFFF',  # 进度区保持明亮，让内容卡片承担层级。
+    'panel': '#F8F6F4',  # 统计、详情与进度摘要使用的浅暖色底。
+    'border': '#E9E3DE',  # 分区、输入框和分隔线的边框。
     'text': '#24313A',  # 主要文字。
     'muted': '#59636B',  # 辅助说明和状态文字。
     'brand': '#C84D2C',  # 主按钮、图标和进度条。
     'brand_hover': '#A83A20',  # 主按钮悬停或按下时的颜色。
-    'brand_light': '#F7EBE6',  # 次要按钮的悬停背景。
+    'brand_light': '#FBECE5',  # 当前标签、选中行及提示的浅色背景。
     'field': '#FFFFFF',  # 输入框及日志区域背景。
-    'track': '#E7E4E2',  # 进度条尚未完成部分的背景。
+    'track': '#EDE8E4',  # 进度条尚未完成部分的背景。
+    'success': '#286B50',  # 已完成状态的文字色。
+    'warning': '#A04429',  # 缺图、待确认或失败时的文字色。
 }
 
 
@@ -283,43 +286,101 @@ class ImageStatusTable(ttk.Frame):
     def __init__(self, parent, *, height=3, detail_height=2):
         # 作用：创建可滚动的图片表格和选中项详情。
         # 使用场景：初始化主窗口或检查弹窗时调用；不依赖浏览器或用户文件。
-        super().__init__(parent)
+        super().__init__(parent, style='Surface.TFrame')
+        colors = UI_COLORS
         self.summary = tk.StringVar(value='等待检查本地图片。')
-        self.summary_label = ttk.Label(self, textvariable=self.summary, anchor='w')
-        self.summary_label.pack(fill='x', pady=(0, 6))
-        table_frame = ttk.Frame(self)
+        self.count_values = {key: tk.StringVar(value='—') for key in ('images', 'references', 'missing')}
+        metrics = tk.Frame(self, background=colors['surface'])
+        metrics.pack(fill='x', pady=(0, 12))
+        for column, (key, label) in enumerate((('images', '图片'), ('references', '引用'),
+                                               ('missing', '缺失'))):
+            metrics.grid_columnconfigure(column, weight=1, uniform='metric')
+            card = tk.Frame(metrics, background=colors['panel'], padx=12, pady=7)
+            card.grid(row=0, column=column, sticky='nsew', padx=(0 if column == 0 else 5, 0))
+            tk.Label(card, text=label, background=colors['panel'], foreground=colors['muted'],
+                     font=('Microsoft YaHei UI', 9), anchor='w').pack(fill='x')
+            number = tk.Label(card, textvariable=self.count_values[key], background=colors['panel'],
+                              foreground=colors['text'], font=('Microsoft YaHei UI', 13, 'bold'), anchor='w')
+            number.pack(fill='x', pady=(1, 0))
+            if key == 'missing':
+                self.missing_count_label = number
+
+        # 详情卡片固定在清单下面，正文可以选择复制，也能滚动查看长路径。
+        details_card = tk.Frame(self, background=colors['panel'], padx=12, pady=8)
+        details_card.pack(side='bottom', fill='x', pady=(10, 0))
+        detail_header = tk.Frame(details_card, background=colors['panel'])
+        detail_header.pack(fill='x')
+        tk.Label(detail_header, text='图片详情', background=colors['panel'], foreground=colors['text'],
+                 font=('Microsoft YaHei UI', 9, 'bold'), anchor='w').pack(side='left')
+        tk.Label(detail_header, text='选中图片查看路径与说明', background=colors['panel'],
+                 foreground=colors['muted'], font=('Microsoft YaHei UI', 9), anchor='e').pack(side='right')
+        details_frame = tk.Frame(details_card, background=colors['panel'])
+        details_frame.pack(fill='x', pady=(4, 0))
+        self.details = tk.Text(details_frame, width=25, height=detail_height, wrap='word', state='disabled',
+                               font=('Microsoft YaHei UI', 9), relief='flat', borderwidth=0,
+                               highlightthickness=0, background=colors['panel'], foreground=colors['text'])
+        detail_scroll = ttk.Scrollbar(details_frame, orient='vertical', command=self.details.yview,
+                                      style='Slim.Vertical.TScrollbar')
+        self.details.configure(yscrollcommand=detail_scroll.set)
+        self.details.pack(side='left', fill='both', expand=True)
+        detail_scroll.pack(side='right', fill='y')
+
+        list_heading = tk.Frame(self, background=colors['surface'])
+        list_heading.pack(fill='x', pady=(0, 7))
+        tk.Label(list_heading, text='图片清单', background=colors['surface'], foreground=colors['text'],
+                 font=('Microsoft YaHei UI', 10, 'bold'), anchor='w').pack(side='left')
+        tk.Label(list_heading, text='选择一行查看详情', background=colors['surface'], foreground=colors['muted'],
+                 font=('Microsoft YaHei UI', 9), anchor='e').pack(side='right')
+        table_frame = tk.Frame(self, background=colors['surface'], highlightbackground=colors['border'],
+                               highlightthickness=1, borderwidth=0)
         table_frame.pack(fill='both', expand=True)
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
         style = ttk.Style(self)
         scale = max(1.0, self.winfo_fpixels('1i') / 96.0)
-        style.configure('ImageStatus.Treeview', font=('Microsoft YaHei UI', 9), rowheight=round(26 * scale))
+        style.configure('ImageStatus.Treeview', font=('Microsoft YaHei UI', 9), rowheight=round(32 * scale),
+                        background=colors['surface'], fieldbackground=colors['surface'],
+                        foreground=colors['text'], borderwidth=0, relief='flat')
+        style.map('ImageStatus.Treeview', background=[('selected', colors['brand_light'])],
+                  foreground=[('selected', '#813B25')])
+        style.configure('ImageStatus.Treeview.Heading', font=('Microsoft YaHei UI', 9, 'bold'),
+                        background=colors['panel'], foreground=colors['muted'], relief='flat',
+                        borderwidth=0, padding=(8, 7))
+        style.map('ImageStatus.Treeview.Heading', background=[('active', colors['panel'])])
         self.tree = ttk.Treeview(table_frame, columns=('image', 'lines', 'state'), show='headings',
                                  selectmode='browse', height=height, style='ImageStatus.Treeview')
         for column, title, width in (('image', '图片文件', 120), ('lines', '引用行号', 100),
                                      ('state', '处理状态', 190)):
-            self.tree.heading(column, text=title)
+            self.tree.heading(column, text=title, anchor='w')
             self.tree.column(column, width=width, minwidth=75, stretch=(column == 'image'))
         self.tree.grid(row=0, column=0, sticky='nsew')
-        vertical = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview)
+        vertical = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview,
+                                 style='Slim.Vertical.TScrollbar')
         vertical.grid(row=0, column=1, sticky='ns')
-        horizontal = ttk.Scrollbar(table_frame, orient='horizontal', command=self.tree.xview)
-        horizontal.grid(row=1, column=0, sticky='ew')
-        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-        ttk.Label(self, text='选中图片可查看完整路径和处理说明：').pack(anchor='w', pady=(7, 3))
-        details_frame = ttk.Frame(self)
-        details_frame.pack(fill='x')
-        self.details = tk.Text(details_frame, width=25, height=detail_height, wrap='word', state='disabled',
-                               font=('Microsoft YaHei UI', 9), relief='solid', borderwidth=1,
-                               background=UI_COLORS['field'], foreground=UI_COLORS['text'])
-        detail_scroll = ttk.Scrollbar(details_frame, orient='vertical', command=self.details.yview)
-        self.details.configure(yscrollcommand=detail_scroll.set)
-        self.details.pack(side='left', fill='both', expand=True)
-        detail_scroll.pack(side='right', fill='y')
+        self.horizontal_scroll = ttk.Scrollbar(table_frame, orient='horizontal', command=self.tree.xview,
+                                              style='Slim.Horizontal.TScrollbar')
+        self.horizontal_scroll.grid(row=1, column=0, sticky='ew')
+        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=self._sync_horizontal_scroll)
+        self.tree.tag_configure('problem', foreground=colors['warning'])
+        self.tree.tag_configure('success', foreground=colors['success'])
+        self.empty_label = tk.Label(table_frame, text='选择 Markdown 文件后，这里会显示图片清单',
+                                    background=colors['surface'], foreground=colors['muted'],
+                                    font=('Microsoft YaHei UI', 9))
+        self.empty_label.place(relx=0.5, rely=0.62, anchor='center')
         self.tree.bind('<<TreeviewSelect>>', self._show_details)
         self._items_by_path = {}
         self._images_by_item = {}
         self._reasons_by_item = {}
+        self._set_details('选中图片后，可在这里查看完整路径和处理说明。')
+
+    def _sync_horizontal_scroll(self, first, last):
+        # 作用：只在表格内容超出宽度时显示横向滚动条。
+        # 使用场景：窗口缩窄或用户调整列宽，不让无效滚动条占据视觉空间。
+        self.horizontal_scroll.set(first, last)
+        if float(first) > 0 or float(last) < 1:
+            self.horizontal_scroll.grid()
+        else:
+            self.horizontal_scroll.grid_remove()
 
     def _set_details(self, text: str):
         # 作用：更新只读详情区域，同时允许用户选择并复制路径。
@@ -337,7 +398,12 @@ class ImageStatusTable(ttk.Frame):
         self._images_by_item.clear()
         self._reasons_by_item.clear()
         self.summary.set('等待检查本地图片。')
-        self._set_details('')
+        for value in self.count_values.values():
+            value.set('—')
+        self.missing_count_label.configure(foreground=UI_COLORS['text'])
+        self.empty_label.configure(text='选择 Markdown 文件后，这里会显示图片清单')
+        self.empty_label.place(relx=0.5, rely=0.62, anchor='center')
+        self._set_details('选中图片后，可在这里查看完整路径和处理说明。')
 
     def set_preflight(self, plan: ImagePreflight):
         # 作用：按检查结果建立图片行，并优先选中缺失图片。
@@ -345,11 +411,16 @@ class ImageStatusTable(ttk.Frame):
         self.clear()
         missing_count = sum(image.missing for image in plan.images)
         self.summary.set(f'{len(plan.images)} 张本地图片，{plan.reference_count} 处引用，{missing_count} 张缺失。')
+        self.count_values['images'].set(str(len(plan.images)))
+        self.count_values['references'].set(str(plan.reference_count))
+        self.count_values['missing'].set(str(missing_count))
+        self.missing_count_label.configure(foreground=UI_COLORS['warning'] if missing_count else UI_COLORS['text'])
         first_missing = None
         for image in plan.images:
             lines = '、'.join(str(line) for line in image.lines)
             state = '图片缺失' if image.missing else '未处理'
-            item = self.tree.insert('', 'end', values=(image.path.name, lines, state))
+            item = self.tree.insert('', 'end', values=(image.path.name, lines, state),
+                                    tags=('problem',) if image.missing else ())
             self._items_by_path[image.path] = item
             self._images_by_item[item] = image
             self._reasons_by_item[item] = '找不到该文件，请检查路径或恢复图片。' if image.missing else ''
@@ -357,12 +428,14 @@ class ImageStatusTable(ttk.Frame):
                 first_missing = item
         children = self.tree.get_children()
         if children:
+            self.empty_label.place_forget()
             selected = first_missing or children[0]
             self.tree.selection_set(selected)
             self.tree.focus(selected)
             self.tree.see(selected)
             self._show_details()
         else:
+            self.empty_label.configure(text='没有识别到需要上传的本地图片')
             self._set_details('没有识别到需要上传的本地图片。')
 
     def set_status(self, path: Path, state: str, reason: str = ''):
@@ -372,6 +445,9 @@ class ImageStatusTable(ttk.Frame):
         if item is None:
             return
         self.tree.set(item, 'state', state)
+        tags = ('success',) if state == '已上传并替换' else (
+            ('problem',) if state in ('图片缺失', '处理失败', '上传结果待确认') else ())
+        self.tree.item(item, tags=tags)
         self._reasons_by_item[item] = reason
         if item in self.tree.selection():
             self._show_details()
@@ -406,41 +482,166 @@ class PreflightDialog(tk.Toplevel):
         self.result = False
         self.title('处理前检查')
         self.transient(parent)
-        width = min(parent._dpi_pixels(800), max(360, self.winfo_screenwidth() - 60))
-        height = min(parent._dpi_pixels(570), max(330, self.winfo_screenheight() - 100))
-        self.geometry(f'{width}x{height}')
+        colors = UI_COLORS
+        self.configure(background=colors['surface'])
+        width = max(1, min(parent._dpi_pixels(800), self.winfo_screenwidth() - 40))
+        # 少量图片采用更紧凑的窗口；图片较多时适当增加列表空间。
+        preferred_height = 520 + 8 * max(0, min(len(plan.images), 12) - 3)
+        height = max(1, min(parent._dpi_pixels(preferred_height), self.winfo_screenheight() - 80))
+        x = max(0, min(parent.winfo_rootx() + (parent.winfo_width() - width) // 2,
+                       self.winfo_screenwidth() - width))
+        y = max(0, min(parent.winfo_rooty() + (parent.winfo_height() - height) // 2,
+                       self.winfo_screenheight() - height))
+        self.geometry(f'{width}x{height}+{x}+{y}')
         self.minsize(min(width, 420), min(height, 330))
-        container = ttk.Frame(self, padding=16)
-        container.pack(fill='both', expand=True)
+        # 顶部强调检查步骤，正文、结果和操作分区保持清晰。
+        tk.Frame(self, height=4, background=colors['brand']).pack(fill='x')
+        header = tk.Frame(self, background=colors['surface'], padx=22, pady=16)
+        header.pack(fill='x')
+        tk.Label(header, text='处理前检查', background=colors['surface'], foreground=colors['brand'],
+                 font=('Microsoft YaHei UI', 9, 'bold'), anchor='w').pack(fill='x')
+        missing_count = sum(image.missing for image in plan.images)
+        if missing_count:
+            title = f'发现 {missing_count} 张图片缺失'
+        elif plan.images:
+            title = '图片清单已就绪'
+        else:
+            title = '没有发现本地图片'
+        tk.Label(header, text=title, background=colors['surface'], foreground=colors['text'],
+                 font=('Microsoft YaHei UI', 16, 'bold'), anchor='w').pack(fill='x', pady=(3, 2))
         source = '所选 Markdown 文件' if mode == 'import' else 'CSDN 编辑器当前正文'
-        ttk.Label(container, text=f'检查来源：{source}', font=('Microsoft YaHei UI', 11, 'bold')).pack(anchor='w')
-        note = ('相对图片路径按所选 Markdown 文件所在目录解析；选中图片可查看完整路径。')
-        note_label = ttk.Label(container, text=note, wraplength=max(300, width - 70), justify='left')
-        note_label.pack(fill='x', pady=(5, 8))
-        note_label.bind('<Configure>', lambda event: event.widget.configure(wraplength=max(100, event.width)))
-        self.table = ImageStatusTable(container, height=7, detail_height=3)
-        self.table.pack(fill='both', expand=True)
-        self.table.set_preflight(plan)
-        if any(image.missing for image in plan.images):
+        note = f'检查来源：{source}  ·  相对图片路径以所选文档目录为准'
+        note_label = tk.Label(header, text=note, background=colors['surface'], foreground=colors['muted'],
+                              font=('Microsoft YaHei UI', 9), anchor='w', justify='left', wraplength=width - 60)
+        note_label.pack(fill='x')
+        note_label.bind('<Configure>', lambda event: event.widget.configure(wraplength=max(100, event.width - 2)))
+
+        # 底部始终保留操作按钮；缺图时明确继续操作的后果。
+        footer = tk.Frame(self, background=colors['panel'], padx=22, pady=12)
+        footer.pack(side='bottom', fill='x')
+        if missing_count:
             if mode == 'import':
                 warning = '存在缺失图片。继续后会先导入正文，但不会上传图片；建议返回修复。'
             else:
                 warning = '存在缺失图片。继续后会停止处理并保留正文；建议返回修复。'
+        elif not plan.images and mode == 'repair':
+            warning = '当前正文没有需要上传的本地图片，继续后会停止处理。'
         else:
-            warning = '检查完成。确认清单后可继续；处理期间请勿修改编辑器正文。'
-        warning_label = ttk.Label(container, text=warning, wraplength=max(300, width - 70), justify='left')
-        warning_label.pack(fill='x', pady=(8, 8))
-        warning_label.bind('<Configure>', lambda event: event.widget.configure(wraplength=max(100, event.width)))
-        buttons = ttk.Frame(container)
-        buttons.pack(fill='x')
-        self.continue_button = ttk.Button(buttons, text='继续处理', command=lambda: self._finish(True),
+            warning = '确认后开始处理，处理期间请勿修改 CSDN 正文。'
+        self.warning_label = tk.Label(footer, text=warning, background=colors['panel'],
+                                      foreground=colors['warning'] if missing_count else colors['muted'],
+                                      font=('Microsoft YaHei UI', 9), anchor='w', justify='left',
+                                      wraplength=width - 60)
+        self.warning_label.pack(fill='x', pady=(0, 10))
+        self.warning_label.bind('<Configure>', lambda event: event.widget.configure(wraplength=max(100, event.width - 2)))
+        self.buttons = tk.Frame(footer, background=colors['panel'])
+        self.buttons.pack(fill='x')
+        self.continue_button = ttk.Button(self.buttons, text='继续处理', command=lambda: self._finish(True),
                                           style='Primary.TButton')
         self.continue_button.pack(side='right')
-        self.cancel_button = ttk.Button(buttons, text='返回检查', command=lambda: self._finish(False),
+        self.cancel_button = ttk.Button(self.buttons, text='返回检查', command=lambda: self._finish(False),
                                         style='Secondary.TButton')
         self.cancel_button.pack(side='right', padx=(0, 8))
+        self._buttons_stacked = False
+        self.bind('<Configure>', self._layout_buttons, add='+')
+        self.buttons.bind('<Configure>', self._layout_buttons, add='+')
+
+        # 内容区独立滚动，窗口较小时仍可查看表格和详情，底部操作保持可见。
+        content_host = tk.Frame(self, background=colors['surface'])
+        content_host.pack(fill='both', expand=True)
+        content_host.grid_rowconfigure(0, weight=1)
+        content_host.grid_columnconfigure(0, weight=1)
+        self.content_canvas = tk.Canvas(content_host, background=colors['surface'], highlightthickness=0,
+                                        borderwidth=0, width=1, height=1, takefocus=0)
+        self.content_canvas.grid(row=0, column=0, sticky='nsew')
+        self.content_scrollbar = ttk.Scrollbar(content_host, orient='vertical', command=self.content_canvas.yview,
+                                               style='Slim.Vertical.TScrollbar')
+        self.content_scrollbar.grid(row=0, column=1, sticky='ns')
+        self.content_canvas.configure(yscrollcommand=self._sync_content_scrollbar)
+        container = tk.Frame(self.content_canvas, background=colors['surface'], padx=22, pady=4)
+        self.content_window = self.content_canvas.create_window(0, 0, anchor='nw', window=container)
+        container.bind('<Configure>', self._update_content_scroll)
+        self.content_canvas.bind('<Configure>', self._resize_content)
+        self.table = ImageStatusTable(container, height=max(2, min(len(plan.images), 5)), detail_height=3)
+        self.table.pack(fill='both', expand=True)
+        self.table.set_preflight(plan)
+        self.table.tree.bind('<FocusIn>', lambda event: self.after_idle(self._reveal_content_focus, event), add='+')
+        self.table.details.bind('<FocusIn>', lambda event: self.after_idle(self._reveal_content_focus, event), add='+')
+        self.bind('<MouseWheel>', self._scroll_content, add='+')
         self.protocol('WM_DELETE_WINDOW', lambda: self._finish(False))
         self.bind('<Escape>', lambda event: self._finish(False))
+
+    def _layout_buttons(self, event=None):
+        # 作用：在极窄窗口中把两个操作按钮改为上下排列。
+        # 使用场景：高缩放或小屏幕使横排按钮放不下时，保持操作可见。
+        if event is not None and event.widget not in (self, self.buttons):
+            return
+        available = self.buttons.winfo_width()
+        if available <= 1:
+            return
+        required = self.continue_button.winfo_reqwidth() + self.cancel_button.winfo_reqwidth() + 8
+        stacked = available < required
+        if stacked == self._buttons_stacked:
+            return
+        self._buttons_stacked = stacked
+        self.continue_button.pack_forget()
+        self.cancel_button.pack_forget()
+        if stacked:
+            self.continue_button.pack(side='top', fill='x')
+            self.cancel_button.pack(side='top', fill='x', pady=(6, 0))
+        else:
+            self.continue_button.pack(side='right')
+            self.cancel_button.pack(side='right', padx=(0, 8))
+
+    def _sync_content_scrollbar(self, first, last):
+        # 作用：内容完整显示时隐藏滚动条，空间不足时显示滚动入口。
+        # 使用场景：检查窗口尺寸或内容发生变化时由画布调用。
+        self.content_scrollbar.set(first, last)
+        if float(first) > 0 or float(last) < 1:
+            self.content_scrollbar.grid()
+        else:
+            self.content_scrollbar.grid_remove()
+
+    def _update_content_scroll(self, event=None):
+        # 作用：让滚动范围始终覆盖完整的图片清单与详情。
+        # 使用场景：内容自然高度随图片数量或字体缩放变化时调用。
+        self.content_canvas.configure(scrollregion=self.content_canvas.bbox('all') or (0, 0, 1, 1))
+
+    def _resize_content(self, event):
+        # 作用：让滚动内容跟随检查窗口的实际宽度。
+        # 使用场景：用户调整窗口大小或显示滚动条时调用。
+        self.content_canvas.itemconfigure(self.content_window, width=max(1, event.width))
+        self._update_content_scroll()
+
+    def _scroll_content(self, event):
+        # 作用：在小窗口中用鼠标滚轮查看整份检查清单。
+        # 使用场景：表格或详情还能滚动时优先使用内部滚动，到边界后滚动外层。
+        if not event.delta:
+            return None
+        if event.widget in (self.table.tree, self.table.details):
+            first, last = event.widget.yview()
+            if (event.delta > 0 and first > 0) or (event.delta < 0 and last < 1):
+                return None
+        self.content_canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+        return 'break'
+
+    def _reveal_content_focus(self, event):
+        # 作用：键盘焦点进入清单或详情时，将其滚动到内容视口中。
+        # 使用场景：窗口较小且用户通过 Tab 在控件间移动。
+        widget = event.widget
+        viewport_height = self.content_canvas.winfo_height()
+        top = widget.winfo_rooty() - self.content_canvas.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        current = self.content_canvas.canvasy(0)
+        if widget.winfo_height() > viewport_height:
+            target = current + top - 10  # 控件较高时留出顶部边距，再滚动查看其余内容。
+        elif top < 0:
+            target = current + top - 10
+        else:
+            target = current + max(0, bottom - viewport_height + 10)
+        region = self.content_canvas.bbox('all')
+        if region and region[3] > 0:
+            self.content_canvas.yview_moveto(max(0, target) / region[3])
 
     def _finish(self, result: bool):
         # 作用：保存用户选择并关闭检查窗口。
@@ -484,6 +685,8 @@ class Application(tk.Tk):
         self.browser_status = tk.StringVar(value='浏览器未打开')  # 只反映浏览器状态，不推断登录状态。
         self.progress_value = tk.DoubleVar(value=0)  # 已完成图片所占的百分比。
         self.progress_text = tk.StringVar(value='等待开始')  # 进度条旁边的说明文字。
+        self.progress_percentage = tk.StringVar(value='0%')  # 以数字补充进度条，方便快速判断。
+        self.progress_value.trace_add('write', self._sync_progress_percentage)
         self.busy = False  # 当前是否正在执行任务。
         self.browser_open = False  # 助手浏览器是否已成功打开。
         self.current_browser = None  # 记录实际打开的浏览器，与下拉框的当前选择区分。
@@ -509,8 +712,8 @@ class Application(tk.Tk):
                   background=[('disabled', '#C8B2AA'), ('pressed', colors['brand_hover']),
                               ('active', colors['brand_hover'])], foreground=[('disabled', '#FFFFFF')])
         style.configure('Secondary.TButton', font=('Microsoft YaHei UI', 10),
-                        foreground=colors['text'], background='#F5F4F3',
-                        bordercolor='#8A8886', lightcolor='#8A8886', darkcolor='#8A8886',
+                        foreground=colors['text'], background=colors['surface'],
+                        bordercolor='#D8D2CD', lightcolor='#D8D2CD', darkcolor='#D8D2CD',
                         borderwidth=1, padding=(12, 7), focuscolor=colors['brand'])
         style.map('Secondary.TButton',
                   background=[('disabled', '#EDEBEA'), ('pressed', '#EAD8D1'),
@@ -536,15 +739,45 @@ class Application(tk.Tk):
         style.configure('Upload.Horizontal.TProgressbar', troughcolor=colors['track'],
                         background=colors['brand'], bordercolor=colors['track'],
                         lightcolor=colors['brand'], darkcolor=colors['brand'], thickness=9)
+        # 输出区使用平面选项卡与轻量滚动条，避免 Windows 默认灰色面板。
+        style.configure('Surface.TFrame', background=colors['surface'])
+        style.configure('Results.TNotebook', background=colors['surface'], borderwidth=0, relief='flat',
+                        bordercolor=colors['surface'], lightcolor=colors['surface'], darkcolor=colors['surface'],
+                        tabmargins=(0, 0, 0, 0))
+        style.layout('Results.TNotebook.Tab', [])  # 可键盘操作的自定义标签位于 Notebook 上方。
+        style.configure('WorkspaceTab.TButton', font=('Microsoft YaHei UI', 9, 'bold'),
+                        background=colors['surface'], foreground=colors['muted'], padding=(14, 7),
+                        borderwidth=0, focuscolor=colors['brand'])
+        style.map('WorkspaceTab.TButton', background=[('active', colors['panel'])])
+        style.configure('WorkspaceSelected.TButton', font=('Microsoft YaHei UI', 9, 'bold'),
+                        background=colors['brand_light'], foreground=colors['warning'], padding=(14, 7),
+                        borderwidth=0, focuscolor=colors['brand'])
+        style.map('WorkspaceSelected.TButton', background=[('active', colors['brand_light'])])
+        for orientation in ('Vertical', 'Horizontal'):
+            style.configure(f'Slim.{orientation}.TScrollbar', background='#D9D1CB',
+                            troughcolor=colors['surface'], bordercolor=colors['surface'],
+                            darkcolor='#D9D1CB', lightcolor='#D9D1CB', gripcount=0, arrowsize=8, width=8)
 
-        # 标题说明这是一项什么任务；不把原型图中的“方案一”放进正式界面。
+        # 标题区使用本地矢量标识，与操作区的线条图标保持一致。
         self.header = tk.Frame(self, background=colors['page'], padx=24, pady=14)
         self.header.pack(fill='x')
-        title_label = tk.Label(self.header, text=APP_NAME, background=colors['page'], foreground=colors['text'],
+        logo = tk.Canvas(self.header, width=self._dpi_pixels(38), height=self._dpi_pixels(38),
+                         background=colors['page'], highlightthickness=0, borderwidth=0)
+        logo.pack(side='left', anchor='n', padx=(0, 12))
+        logo.create_rectangle(1, 1, 37, 37, fill=colors['brand'], outline=colors['brand'])
+        logo.create_line(11, 8, 21, 8, 27, 14, 27, 30, 11, 30, 11, 8,
+                         fill='#FFFFFF', width=2, joinstyle='round')
+        logo.create_line(21, 8, 21, 14, 27, 14, fill='#FFFFFF', width=2)
+        logo.create_line(15, 19, 23, 19, fill='#FFFFFF', width=2, capstyle='round')
+        logo.create_line(15, 24, 23, 24, fill='#FFFFFF', width=2, capstyle='round')
+        logo.scale('all', 0, 0, self.ui_scale, self.ui_scale)
+        header_text = tk.Frame(self.header, background=colors['page'])
+        header_text.pack(side='left', fill='x', expand=True)
+        title_label = tk.Label(header_text, text=APP_NAME, background=colors['page'], foreground=colors['text'],
                                font=('Microsoft YaHei UI', 17, 'bold'), anchor='w', justify='left')
         title_label.pack(fill='x')
         title_label.bind('<Configure>', self._wrap_label_to_width)
-        subtitle = tk.Label(self.header, text='导入 Markdown 正文，上传并替换本地图片', background=colors['page'],
+        subtitle = tk.Label(header_text, text='导入 Markdown 正文，上传并替换本地图片', background=colors['page'],
                             foreground=colors['muted'], font=('Microsoft YaHei UI', 9), anchor='w', justify='left')
         subtitle.pack(fill='x', pady=(3, 0))
         subtitle.bind('<Configure>', self._wrap_label_to_width)
@@ -629,41 +862,63 @@ class Application(tk.Tk):
                                        style='Secondary.TButton', state='disabled')
         self.cancel_button.pack(anchor='w', pady=(7, 0))
 
-        # 进度文字、进度条和日志保留原状态变量；处理时日志随右侧区域扩展。
+        # 进度摘要、可见百分比和状态说明集中在同一张浅色卡片里。
         self._section_heading(right, '处理进度', 'progress', colors['progress_surface'])
-        tk.Label(right, textvariable=self.progress_text, background=colors['progress_surface'],
-                 foreground=colors['muted'], font=('Microsoft YaHei UI', 10), anchor='w').pack(fill='x', pady=(8, 5))
-        self.progress_bar = ttk.Progressbar(right, variable=self.progress_value, maximum=100,
+        progress_card = tk.Frame(right, background=colors['panel'], padx=14, pady=12)
+        progress_card.pack(fill='x', pady=(12, 0))
+        progress_row = tk.Frame(progress_card, background=colors['panel'])
+        progress_row.pack(fill='x')
+        progress_copy = tk.Frame(progress_row, background=colors['panel'])
+        progress_copy.pack(side='left', fill='x', expand=True)
+        tk.Label(progress_copy, text='当前状态', background=colors['panel'], foreground=colors['muted'],
+                 font=('Microsoft YaHei UI', 9), anchor='w').pack(fill='x')
+        tk.Label(progress_copy, textvariable=self.progress_text, background=colors['panel'],
+                 foreground=colors['text'], font=('Microsoft YaHei UI', 11, 'bold'), anchor='w').pack(fill='x')
+        tk.Label(progress_row, textvariable=self.progress_percentage, background=colors['panel'],
+                 foreground=colors['brand'], font=('Microsoft YaHei UI', 17, 'bold'), anchor='e').pack(side='right')
+        self.progress_bar = ttk.Progressbar(progress_card, variable=self.progress_value, maximum=100,
                                              style='Upload.Horizontal.TProgressbar')
-        self.progress_bar.pack(fill='x')
-        self._divider(right, colors['progress_surface'])
-        self._section_heading(right, '处理记录', 'log', colors['progress_surface'])
-        # 状态栏保持两行，长文件名的完整内容仍可在下方可滚动日志中查看。
-        self.status_label = tk.Label(right, textvariable=self.status, background=colors['progress_surface'],
+        self.progress_bar.pack(fill='x', pady=(10, 4))
+        # 状态始终显示完整语义；超长文件名仍保留在可滚动日志中。
+        self.status_label = tk.Label(progress_card, textvariable=self.status, background=colors['panel'],
                                      foreground=colors['muted'], font=('Microsoft YaHei UI', 9),
                                      anchor='w', justify='left', wraplength=280, height=2)
-        self.status_label.pack(fill='x', pady=(6, 8))
+        self.status_label.pack(fill='x', pady=(5, 0))
         self.status_label.bind('<Configure>', self._wrap_label_to_width)
-        # 日志和逐图结果分开显示；处理开始后自动切到图片结果，日志仍可随时查看。
-        self.output_notebook = ttk.Notebook(right)
-        self.output_notebook.pack(fill='both', expand=True)
-        self.log_tab = ttk.Frame(self.output_notebook)
-        self.results_tab = ttk.Frame(self.output_notebook, padding=6)
+        self._divider(right, colors['progress_surface'])
+        self._section_heading(right, '处理记录', 'log', colors['progress_surface'])
+        # 使用平面按钮切换日志和图片结果；保留 Notebook 的页面与键盘访问能力。
+        self.output_notebook = ttk.Notebook(right, style='Results.TNotebook')
+        self.log_tab = ttk.Frame(self.output_notebook, style='Surface.TFrame')
+        self.results_tab = ttk.Frame(self.output_notebook, padding=(0, 10, 0, 0), style='Surface.TFrame')
         self.output_notebook.add(self.log_tab, text='处理日志')
         self.output_notebook.add(self.results_tab, text='图片结果')
-        log_frame = tk.Frame(self.log_tab, background=colors['field'], highlightbackground='#C9C7C5',
-                             highlightthickness=1, borderwidth=0)
-        log_frame.pack(fill='both', expand=True)
+        tab_row = tk.Frame(right, background=colors['surface'])
+        tab_row.pack(fill='x', pady=(10, 0))
+        self.log_tab_button = ttk.Button(tab_row, text='处理日志', style='WorkspaceSelected.TButton',
+                                         command=lambda: self.output_notebook.select(self.log_tab))
+        self.log_tab_button.pack(side='left')
+        self.results_tab_button = ttk.Button(tab_row, text='图片结果', style='WorkspaceTab.TButton',
+                                             command=lambda: self.output_notebook.select(self.results_tab))
+        self.results_tab_button.pack(side='left', padx=(6, 0))
+        self.output_notebook.pack(fill='both', expand=True)
+        log_frame = tk.Frame(self.log_tab, background=colors['panel'], highlightthickness=0, borderwidth=0)
+        log_frame.pack(fill='both', expand=True, pady=(10, 0))
         self.log = tk.Text(log_frame, width=25, height=5, wrap='word', state='disabled',
                            font=('Microsoft YaHei UI', 9), relief='flat', borderwidth=0,
-                           background=colors['field'], foreground=colors['text'],
+                           background=colors['panel'], foreground=colors['text'],
                            padx=10, pady=8, highlightthickness=0)
-        scroll = ttk.Scrollbar(log_frame, orient='vertical', command=self.log.yview)
+        scroll = ttk.Scrollbar(log_frame, orient='vertical', command=self.log.yview,
+                               style='Slim.Vertical.TScrollbar')
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side='left', fill='both', expand=True)
         scroll.pack(side='right', fill='y')
         self.image_table = ImageStatusTable(self.results_tab)
         self.image_table.pack(fill='both', expand=True)
+        # 未显示的图片页不应撑大日志；切到图片页时再恢复其自然尺寸，供小屏滚动查看。
+        self.results_tab.configure(width=self._dpi_pixels(250), height=self._dpi_pixels(120))
+        self.results_tab.pack_propagate(False)
+        self.output_notebook.bind('<<NotebookTabChanged>>', self._output_tab_changed, add='+')
         self.append_log('原 Markdown 文件不会被改写；处理完成后请自行检查并发布。')
 
         # 尺寸变化时重新计算布局；焦点移动到屏幕外控件时自动滚动到该控件。
@@ -673,8 +928,18 @@ class Application(tk.Tk):
         self.bind('<MouseWheel>', self._scroll_page, add='+')
         for widget in (self.file_entry, self.file_button, self.browser_combo, self.open_button,
                        self.import_radio, self.repair_radio, self.backup_checkbox, self.process_button,
-                       self.cancel_button):
+                       self.cancel_button, self.log_tab_button, self.results_tab_button,
+                       self.image_table.tree, self.image_table.details):
             widget.bind('<FocusIn>', lambda event: self.after_idle(self._ensure_widget_visible, event.widget), add='+')
+
+    def _output_tab_changed(self, event=None):
+        # 作用：依据当前选项卡调整图片页的尺寸参与方式。
+        # 使用场景：小屏切换日志和图片结果时，避免隐藏页面挤压可见内容。
+        showing_results = self.output_notebook.select() == str(self.results_tab)
+        self.results_tab.pack_propagate(showing_results)
+        self.log_tab_button.configure(style='WorkspaceTab.TButton' if showing_results else 'WorkspaceSelected.TButton')
+        self.results_tab_button.configure(style='WorkspaceSelected.TButton' if showing_results else 'WorkspaceTab.TButton')
+        self._schedule_page_layout()
 
     def _configure_choice_indicators(self, style: ttk.Style):
         # 作用：使用较大的 Windows 原生单选圆点与带对号的复选框。
@@ -902,6 +1167,11 @@ class Application(tk.Tk):
         height = min(max(self._dpi_pixels(720), requested_height), available_height)
         self.minsize(min(self._dpi_pixels(880), available_width), min(self._dpi_pixels(620), available_height))
         self.geometry(f'{width}x{height}')
+
+    def _sync_progress_percentage(self, *_):
+        # 作用：把后台更新的进度值同步为可直接阅读的百分比。
+        # 使用场景：进度值改变时由 Tk 变量回调触发，不改变既有进度计算。
+        self.progress_percentage.set(f'{self.progress_value.get():.0f}%')
 
     def append_log(self, message: str):
         # 作用：向只读日志区域追加消息并滚动到末尾。
