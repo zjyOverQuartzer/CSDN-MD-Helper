@@ -16,7 +16,7 @@ def _run_packaging_self_test(report_path: str) -> int:
         with Path(report_path).open('w', encoding='utf-8') as report:
             try:
                 # 测试使用本地模拟编辑器和临时图片，不读取用户的浏览器登录信息。
-                from tests.test_app_ui import AppUiScalingTest, AppUiTest
+                from tests.test_app_ui import AppUiScalingTest, AppUiTest, PreflightWorkerTest
                 from tests.test_browser_lifecycle import BrowserWorkerLifecycleTest
                 from tests.test_browser_workflow import BrowserWorkflowTest
                 from tests.test_md_images import MarkdownImagesTest
@@ -25,6 +25,7 @@ def _run_packaging_self_test(report_path: str) -> int:
                 suite = unittest.TestSuite((
                     loader.loadTestsFromTestCase(AppUiTest),
                     loader.loadTestsFromTestCase(AppUiScalingTest),
+                    loader.loadTestsFromTestCase(PreflightWorkerTest),
                     loader.loadTestsFromTestCase(BrowserWorkerLifecycleTest),
                     loader.loadTestsFromTestCase(BrowserWorkflowTest),
                     loader.loadTestsFromTestCase(MarkdownImagesTest),

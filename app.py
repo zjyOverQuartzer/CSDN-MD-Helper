@@ -12,9 +12,9 @@ import threading  # 将浏览器操作放到后台线程。
 import tkinter as tk  # 创建桌面窗口与可绑定到控件的变量。
 from tkinter import filedialog, messagebox, ttk  # 文件对话框、提示框和界面控件。
 
-from csdn_browser import (CSDN_EDITOR_URL, HelperError, ProcessingCancelled, choose_target, editor_text,
-                          has_meaningful_text, process_article)
-from md_images import find_images, local_path
+from csdn_browser import (CSDN_EDITOR_URL, HelperError, ImagePreflight, ProcessingCancelled, choose_target,
+                          editor_text, has_meaningful_text, image_preflight, process_article, read_markdown)
+from md_images import restore_image_placeholders
 
 
 # DATA_ROOT 存放助手自己的浏览器登录状态及可选的正文备份。
@@ -69,7 +69,7 @@ class BrowserWorker(threading.Thread):
         self.context = None  # 保存助手专用的持久化浏览器上下文。
         self.browser_name = None  # 保存当前启动的浏览器名称。
 
-    def send(self, kind: str, message: str = ''):
+    def send(self, kind: str, message: object = ''):
         # 作用：把指定类型的消息放入界面事件队列。
         # 使用场景：后台线程需要更新进度、请求确认或报告结果时使用。
         self.events.put((kind, message))  # 主线程按 kind 判断如何处理 message。
@@ -197,6 +197,16 @@ class BrowserWorker(threading.Thread):
         before = editor_text(target)  # 保留确认前正文，稍后检查其间是否发生变化。
         if self.cancel_event.is_set():
             raise ProcessingCancelled('已停止：尚未修改正文或上传图片。')
+        # 导入检查文件内容；修复检查当前编辑器正文，所选文件只作为图片路径基准。
+        markdown = read_markdown(markdown_path)
+        body = markdown if mode == 'import' else restore_image_placeholders(before)
+        plan = image_preflight(body, markdown_path)
+        self.send('preflight', (mode, plan))  # 在任何备份、写入或上传之前请求用户检查。
+        if not self.answers.get():
+            self.send('log', '已取消：没有上传图片，也没有修改正文。')
+            return
+        if self.cancel_event.is_set():
+            raise ProcessingCancelled('已停止：尚未修改正文或上传图片。')
         if mode == 'import' and has_meaningful_text(before):
             # 根据备份开关生成不同的确认说明，避免用户误以为一定有备份。
             backup_note = ('工具会先保存一份本地备份。' if backup_existing
@@ -213,7 +223,11 @@ class BrowserWorker(threading.Thread):
         result = process_article(target, markdown_path, DATA_ROOT / 'recovery',
                                  lambda message: self.send('log', message),
                                  mode=mode, expected_before=before, backup_existing=backup_existing,
-                                 cancel_event=self.cancel_event)
+                                 cancel_event=self.cancel_event,
+                                 expected_markdown=markdown if mode == 'import' else None,
+                                 expected_preflight=plan,
+                                 image_status=lambda path, state, reason: self.send(
+                                     'image_status', (path, state, reason)))
         target.bring_to_front()  # 完成后把文章页面切到前台，方便用户检查。
         # 根据处理模式和结果统计拼接成功提示；只有实际创建备份才显示路径。
         action = '已将所选 Markdown 导入编辑器' if result.imported else '已修复编辑器中的原正文'
@@ -261,6 +275,186 @@ class BrowserWorker(threading.Thread):
                 self.playwright.stop()  # 停止 Playwright 运行实例。
         except Exception:
             pass
+
+
+class ImageStatusTable(ttk.Frame):
+    # 作用：以图片文件为单位展示引用位置、处理状态及完整路径。
+    # 使用场景：主窗口显示处理结果，处理前的确认窗口复用同一套清单。
+    def __init__(self, parent, *, height=3, detail_height=2):
+        # 作用：创建可滚动的图片表格和选中项详情。
+        # 使用场景：初始化主窗口或检查弹窗时调用；不依赖浏览器或用户文件。
+        super().__init__(parent)
+        self.summary = tk.StringVar(value='等待检查本地图片。')
+        self.summary_label = ttk.Label(self, textvariable=self.summary, anchor='w')
+        self.summary_label.pack(fill='x', pady=(0, 6))
+        table_frame = ttk.Frame(self)
+        table_frame.pack(fill='both', expand=True)
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+        style = ttk.Style(self)
+        scale = max(1.0, self.winfo_fpixels('1i') / 96.0)
+        style.configure('ImageStatus.Treeview', font=('Microsoft YaHei UI', 9), rowheight=round(26 * scale))
+        self.tree = ttk.Treeview(table_frame, columns=('image', 'lines', 'state'), show='headings',
+                                 selectmode='browse', height=height, style='ImageStatus.Treeview')
+        for column, title, width in (('image', '图片文件', 120), ('lines', '引用行号', 100),
+                                     ('state', '处理状态', 190)):
+            self.tree.heading(column, text=title)
+            self.tree.column(column, width=width, minwidth=75, stretch=(column == 'image'))
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        vertical = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview)
+        vertical.grid(row=0, column=1, sticky='ns')
+        horizontal = ttk.Scrollbar(table_frame, orient='horizontal', command=self.tree.xview)
+        horizontal.grid(row=1, column=0, sticky='ew')
+        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        ttk.Label(self, text='选中图片可查看完整路径和处理说明：').pack(anchor='w', pady=(7, 3))
+        details_frame = ttk.Frame(self)
+        details_frame.pack(fill='x')
+        self.details = tk.Text(details_frame, width=25, height=detail_height, wrap='word', state='disabled',
+                               font=('Microsoft YaHei UI', 9), relief='solid', borderwidth=1,
+                               background=UI_COLORS['field'], foreground=UI_COLORS['text'])
+        detail_scroll = ttk.Scrollbar(details_frame, orient='vertical', command=self.details.yview)
+        self.details.configure(yscrollcommand=detail_scroll.set)
+        self.details.pack(side='left', fill='both', expand=True)
+        detail_scroll.pack(side='right', fill='y')
+        self.tree.bind('<<TreeviewSelect>>', self._show_details)
+        self._items_by_path = {}
+        self._images_by_item = {}
+        self._reasons_by_item = {}
+
+    def _set_details(self, text: str):
+        # 作用：更新只读详情区域，同时允许用户选择并复制路径。
+        # 使用场景：切换选中图片、更新状态或清空清单时调用。
+        self.details.configure(state='normal')
+        self.details.delete('1.0', 'end')
+        self.details.insert('1.0', text)
+        self.details.configure(state='disabled')
+
+    def clear(self):
+        # 作用：清除旧文章的图片清单，避免与新任务混淆。
+        # 使用场景：开始新的处理或选中的文件无法读取时调用。
+        self.tree.delete(*self.tree.get_children())
+        self._items_by_path.clear()
+        self._images_by_item.clear()
+        self._reasons_by_item.clear()
+        self.summary.set('等待检查本地图片。')
+        self._set_details('')
+
+    def set_preflight(self, plan: ImagePreflight):
+        # 作用：按检查结果建立图片行，并优先选中缺失图片。
+        # 使用场景：选择文件后预览，或开始处理前展示实际正文的检查结果。
+        self.clear()
+        missing_count = sum(image.missing for image in plan.images)
+        self.summary.set(f'{len(plan.images)} 张本地图片，{plan.reference_count} 处引用，{missing_count} 张缺失。')
+        first_missing = None
+        for image in plan.images:
+            lines = '、'.join(str(line) for line in image.lines)
+            state = '图片缺失' if image.missing else '未处理'
+            item = self.tree.insert('', 'end', values=(image.path.name, lines, state))
+            self._items_by_path[image.path] = item
+            self._images_by_item[item] = image
+            self._reasons_by_item[item] = '找不到该文件，请检查路径或恢复图片。' if image.missing else ''
+            if image.missing and first_missing is None:
+                first_missing = item
+        children = self.tree.get_children()
+        if children:
+            selected = first_missing or children[0]
+            self.tree.selection_set(selected)
+            self.tree.focus(selected)
+            self.tree.see(selected)
+            self._show_details()
+        else:
+            self._set_details('没有识别到需要上传的本地图片。')
+
+    def set_status(self, path: Path, state: str, reason: str = ''):
+        # 作用：更新指定图片的处理状态，并保留其他图片的已有结果。
+        # 使用场景：后台报告上传开始、失败、结果待确认或替换成功时调用。
+        item = self._items_by_path.get(path)
+        if item is None:
+            return
+        self.tree.set(item, 'state', state)
+        self._reasons_by_item[item] = reason
+        if item in self.tree.selection():
+            self._show_details()
+
+    def _show_details(self, event=None):
+        # 作用：显示选中图片的完整路径、引用行号、状态和错误说明。
+        # 使用场景：用户用鼠标或键盘选择表格行，或该行状态发生变化。
+        selection = self.tree.selection()
+        if not selection or selection[0] not in self._images_by_item:
+            return
+        item = selection[0]
+        image = self._images_by_item[item]
+        lines = '、'.join(str(line) for line in image.lines)
+        state = self.tree.set(item, 'state')
+        reason = self._reasons_by_item.get(item, '')
+        text = f'完整路径：{image.path}\n引用位置：第 {lines} 行（共 {len(image.lines)} 处）\n状态：{state}'
+        if reason and state in ('处理失败', '上传结果待确认'):
+            # 主窗口详情区较矮，失败时优先显示原因；完整路径仍可向下滚动查看。
+            text = f'状态：{state}\n说明：{reason}\n完整路径：{image.path}\n引用位置：第 {lines} 行'
+        elif reason:
+            text += f'\n说明：{reason}'
+        self._set_details(text)
+
+
+class PreflightDialog(tk.Toplevel):
+    # 作用：在写入正文和上传图片之前，让用户检查实际处理清单并选择是否继续。
+    # 使用场景：导入文件或修复编辑器正文时，由桌面主线程创建和显示。
+    def __init__(self, parent, mode: str, plan: ImagePreflight):
+        # 作用：创建具有滚动清单、缺图说明及继续/取消按钮的确认窗口。
+        # 使用场景：后台线程已完成只读预检，正在等待用户选择。
+        super().__init__(parent)
+        self.result = False
+        self.title('处理前检查')
+        self.transient(parent)
+        width = min(parent._dpi_pixels(800), max(360, self.winfo_screenwidth() - 60))
+        height = min(parent._dpi_pixels(570), max(330, self.winfo_screenheight() - 100))
+        self.geometry(f'{width}x{height}')
+        self.minsize(min(width, 420), min(height, 330))
+        container = ttk.Frame(self, padding=16)
+        container.pack(fill='both', expand=True)
+        source = '所选 Markdown 文件' if mode == 'import' else 'CSDN 编辑器当前正文'
+        ttk.Label(container, text=f'检查来源：{source}', font=('Microsoft YaHei UI', 11, 'bold')).pack(anchor='w')
+        note = ('相对图片路径按所选 Markdown 文件所在目录解析；选中图片可查看完整路径。')
+        note_label = ttk.Label(container, text=note, wraplength=max(300, width - 70), justify='left')
+        note_label.pack(fill='x', pady=(5, 8))
+        note_label.bind('<Configure>', lambda event: event.widget.configure(wraplength=max(100, event.width)))
+        self.table = ImageStatusTable(container, height=7, detail_height=3)
+        self.table.pack(fill='both', expand=True)
+        self.table.set_preflight(plan)
+        if any(image.missing for image in plan.images):
+            if mode == 'import':
+                warning = '存在缺失图片。继续后会先导入正文，但不会上传图片；建议返回修复。'
+            else:
+                warning = '存在缺失图片。继续后会停止处理并保留正文；建议返回修复。'
+        else:
+            warning = '检查完成。确认清单后可继续；处理期间请勿修改编辑器正文。'
+        warning_label = ttk.Label(container, text=warning, wraplength=max(300, width - 70), justify='left')
+        warning_label.pack(fill='x', pady=(8, 8))
+        warning_label.bind('<Configure>', lambda event: event.widget.configure(wraplength=max(100, event.width)))
+        buttons = ttk.Frame(container)
+        buttons.pack(fill='x')
+        self.continue_button = ttk.Button(buttons, text='继续处理', command=lambda: self._finish(True),
+                                          style='Primary.TButton')
+        self.continue_button.pack(side='right')
+        self.cancel_button = ttk.Button(buttons, text='返回检查', command=lambda: self._finish(False),
+                                        style='Secondary.TButton')
+        self.cancel_button.pack(side='right', padx=(0, 8))
+        self.protocol('WM_DELETE_WINDOW', lambda: self._finish(False))
+        self.bind('<Escape>', lambda event: self._finish(False))
+
+    def _finish(self, result: bool):
+        # 作用：保存用户选择并关闭检查窗口。
+        # 使用场景：点击继续、返回、关闭按钮或按 Escape 时调用。
+        self.result = result
+        self.destroy()
+
+    def ask(self) -> bool:
+        # 作用：以模态方式等待检查完成，并返回用户是否同意继续。
+        # 使用场景：主界面收到后台预检事件时调用；取消默认不修改正文。
+        self.grab_set()
+        self.table.tree.focus_set()
+        self.wait_window()
+        return self.result
 
 
 class Application(tk.Tk):
@@ -443,14 +637,21 @@ class Application(tk.Tk):
                                              style='Upload.Horizontal.TProgressbar')
         self.progress_bar.pack(fill='x')
         self._divider(right, colors['progress_surface'])
-        self._section_heading(right, '处理日志', 'log', colors['progress_surface'])
+        self._section_heading(right, '处理记录', 'log', colors['progress_surface'])
         # 状态栏保持两行，长文件名的完整内容仍可在下方可滚动日志中查看。
         self.status_label = tk.Label(right, textvariable=self.status, background=colors['progress_surface'],
                                      foreground=colors['muted'], font=('Microsoft YaHei UI', 9),
                                      anchor='w', justify='left', wraplength=280, height=2)
         self.status_label.pack(fill='x', pady=(6, 8))
         self.status_label.bind('<Configure>', self._wrap_label_to_width)
-        log_frame = tk.Frame(right, background=colors['field'], highlightbackground='#C9C7C5',
+        # 日志和逐图结果分开显示；处理开始后自动切到图片结果，日志仍可随时查看。
+        self.output_notebook = ttk.Notebook(right)
+        self.output_notebook.pack(fill='both', expand=True)
+        self.log_tab = ttk.Frame(self.output_notebook)
+        self.results_tab = ttk.Frame(self.output_notebook, padding=6)
+        self.output_notebook.add(self.log_tab, text='处理日志')
+        self.output_notebook.add(self.results_tab, text='图片结果')
+        log_frame = tk.Frame(self.log_tab, background=colors['field'], highlightbackground='#C9C7C5',
                              highlightthickness=1, borderwidth=0)
         log_frame.pack(fill='both', expand=True)
         self.log = tk.Text(log_frame, width=25, height=5, wrap='word', state='disabled',
@@ -461,6 +662,8 @@ class Application(tk.Tk):
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side='left', fill='both', expand=True)
         scroll.pack(side='right', fill='y')
+        self.image_table = ImageStatusTable(self.results_tab)
+        self.image_table.pack(fill='both', expand=True)
         self.append_log('原 Markdown 文件不会被改写；处理完成后请自行检查并发布。')
 
         # 尺寸变化时重新计算布局；焦点移动到屏幕外控件时自动滚动到该控件。
@@ -651,7 +854,7 @@ class Application(tk.Tk):
     def _scroll_page(self, event):
         # 作用：用鼠标滚轮滚动超出窗口的页面内容。
         # 使用场景：小屏或高缩放时；鼠标在日志框上时保留日志自身的滚动。
-        if event.widget is self.log or not self._page_scroll_visible:
+        if event.widget in (self.log, self.image_table.tree, self.image_table.details) or not self._page_scroll_visible:
             return None
         if event.delta:
             self.page_canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
@@ -734,16 +937,15 @@ class Application(tk.Tk):
         self.markdown_path.set(selected)  # 同步到界面路径输入框。
         path = Path(selected)  # 转为 Path，方便读取和解析相对图片路径。
         try:
-            body = path.read_text(encoding='utf-8-sig')  # 支持 UTF-8 文件及可选 BOM。
-            # 这里仅预检查并显示数量，真正处理时还会按当前正文重新检查。
-            refs = find_images(body)
-            local = [p for ref in refs if (p := local_path(ref.source, path)) is not None]  # 过滤网络图片。
-            missing = sum(not p.is_file() for p in set(local))  # 去重后统计缺失文件。
-            self.append_log(f'所选文件包含 {len(local)} 处本地图片引用；其中 {missing} 张不同图片未找到。')
-            if missing:  # 预检查发现缺图时补充说明正式处理会列出具体路径。
-                self.append_log('提示：开始处理时会检查文章实际引用的图片，并列出缺失文件。')
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            plan = image_preflight(read_markdown(path), path)
+            missing = sum(image.missing for image in plan.images)
+            self.image_table.set_preflight(plan)
+            self.output_notebook.select(self.results_tab)
+            self.status.set('已检查所选文件；仅修复时会重新检查编辑器正文。')
+            self.append_log(f'所选文件包含 {plan.reference_count} 处本地图片引用；其中 {missing} 张不同图片未找到。')
+        except (HelperError, OSError, ValueError) as exc:
             # 文件无法读取、不是 UTF-8 或路径无效时只记录提示。
+            self.image_table.clear()
             self.append_log(f'读取文件失败：{exc}')
 
     def set_busy(self, value: bool):
@@ -800,6 +1002,8 @@ class Application(tk.Tk):
         self.worker.cancel_event.clear()  # 新任务独立于上一次停止请求。
         self.progress_value.set(0)
         self.progress_text.set('正在准备…')
+        self.image_table.clear()  # 实际检查结果随后从后台线程返回。
+        self.output_notebook.select(self.results_tab)
         self.set_busy(True)  # 锁定相关控件直到工作线程报告 idle。
         self.status.set('正在处理，请在完成前不要修改文章正文。')  # 提醒避免并发修改。
         # 按工作线程 process 方法的参数顺序打包路径、模式和备份选项。
@@ -849,6 +1053,24 @@ class Application(tk.Tk):
                     if self.active_action != 'open':
                         self.status.set(notice)
                     self.browser_combo.configure(state='disabled' if self.busy else 'readonly')
+                elif kind == 'preflight':
+                    # 实际清单来自当前处理模式；取消时绝不执行正文写入。
+                    mode, plan = message
+                    self.image_table.set_preflight(plan)
+                    self.output_notebook.select(self.results_tab)
+                    self.status.set('请检查图片清单，再决定是否继续。')
+                    answer = False
+                    try:
+                        if not self.worker.cancel_event.is_set():
+                            answer = PreflightDialog(self, mode, plan).ask()
+                    except Exception as exc:
+                        self.append_log(f'无法显示图片检查窗口：{exc}')
+                        messagebox.showerror(APP_NAME, '无法显示图片检查窗口，本次处理已取消。', parent=self)
+                    finally:
+                        self.worker.answers.put(answer)
+                elif kind == 'image_status':
+                    path, state, reason = message
+                    self.image_table.set_status(path, state, reason)
                 elif kind in ('confirm_import', 'confirm_switch'):
                     # 在主线程确认覆盖或切换，再通过 answers 队列把选择交回后台。
                     answer = messagebox.askyesno(APP_NAME, message, parent=self)

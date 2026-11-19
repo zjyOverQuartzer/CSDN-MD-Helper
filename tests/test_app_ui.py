@@ -210,6 +210,9 @@ class AppUiTest(unittest.TestCase):
         self.assertEqual(self.window.markdown_path.get(), str(path))
         self.assertIn('1 处本地图片引用', self.window.log.get('1.0', 'end'))
         self.assertIn('1 张不同图片未找到', self.window.log.get('1.0', 'end'))
+        item = self.window.image_table.tree.get_children()[0]
+        self.assertEqual(self.window.image_table.tree.item(item, 'values'), ('missing.png', '2', '图片缺失'))
+        self.assertIn(str((path.parent / 'missing.png').resolve()), self.window.image_table.details.get('1.0', 'end'))
 
     def test_buttons_submit_selected_options_and_lock_during_work(self):
         # 作用：验证打开浏览器、选择修复模式和取消备份后提交的参数。
@@ -404,6 +407,70 @@ class AppUiTest(unittest.TestCase):
         warning.assert_called_once()
         self.assertTrue(self.window.commands.empty())
         self.assertFalse(self.window.busy)
+
+
+    def test_preflight_cancel_and_image_results_are_visible(self):
+        # 作用：检查预检取消、逐图状态及失败详情在界面中的展示。
+        # 使用场景：用户在处理前返回，或上传一部分图片后遇到错误。
+        path = self.make_document()
+        body = '第一行\n![一](one.png)\n![二](missing.png)\n![三](three.png)'
+        (path.parent / 'one.png').write_bytes(b'image')
+        (path.parent / 'three.png').write_bytes(b'image')
+        plan = app.image_preflight(body, path)
+        self.window.active_action = 'process'
+        self.window.set_busy(True)
+        self.window.events.put(('preflight', ('import', plan)))
+        with patch.object(app.PreflightDialog, 'ask', return_value=False):
+            self.drain_events()
+        self.assertFalse(self.window.worker.answers.get_nowait())
+        rows = self.window.image_table.tree.get_children()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(self.window.image_table.tree.set(rows[1], 'state'), '图片缺失')
+        self.window.events.put(('image_status', (plan.images[0].path, '处理失败', 'HTTP 503')))
+        self.drain_events()
+        self.window.image_table.tree.selection_set(rows[0])
+        self.window.image_table._show_details()
+        self.assertEqual(self.window.image_table.tree.set(rows[0], 'state'), '处理失败')
+        self.assertIn('HTTP 503', self.window.image_table.details.get('1.0', 'end'))
+        self.assertEqual(self.window.image_table.tree.set(rows[1], 'state'), '图片缺失')
+        self.assertEqual(self.window.image_table.tree.set(rows[2], 'state'), '未处理')
+
+    def test_preflight_dialog_can_be_cancelled(self):
+        # 作用：检查模态预检窗口的取消操作和默认安全选择。
+        # 使用场景：用户检查图片后决定返回，不继续修改正文。
+        path = self.make_document()
+        plan = app.image_preflight(path.read_text(encoding='utf-8'), path)
+        dialog = app.PreflightDialog(self.window, 'import', plan)
+        dialog.after(30, dialog.cancel_button.invoke)
+        self.assertFalse(dialog.ask())
+
+        dialog = app.PreflightDialog(self.window, 'import', plan)
+        dialog.after(30, dialog.continue_button.invoke)
+        self.assertTrue(dialog.ask())
+
+
+class PreflightWorkerTest(unittest.TestCase):
+    # 作用：验证后台线程根据处理模式选择正确正文，并等待用户确认。
+    # 使用场景：不连接浏览器，检查预检取消时不会调用正文处理逻辑。
+    def test_preflight_uses_editor_for_repair_and_file_for_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '文章.md'
+            path.write_text('文件正文\n![文件](file.png)', encoding='utf-8')
+            editor = '编辑器正文\n\n![编辑器](editor.png)'
+            for mode, expected, line in (('import', 'file.png', 2), ('repair', 'editor.png', 3)):
+                with self.subTest(mode=mode):
+                    events = queue.Queue()
+                    worker = app.BrowserWorker(queue.Queue(), events)
+                    worker.context = object()
+                    worker.answers.put(False)
+                    with patch.object(worker, '_poll_browser'), patch.object(app, 'choose_target'), \
+                            patch.object(app, 'editor_text', return_value=editor), \
+                            patch.object(app, 'process_article') as process:
+                        worker.process(path, mode, False)
+                    kind, (actual_mode, plan) = events.get_nowait()
+                    self.assertEqual((kind, actual_mode), ('preflight', mode))
+                    self.assertEqual((plan.images[0].path.name, plan.images[0].lines), (expected, (line,)))
+                    process.assert_not_called()
 
 
 @unittest.skipIf(os.environ.get('CSDN_CI_HEADLESS') == '1',

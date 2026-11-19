@@ -3,6 +3,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # 实现本地模拟服务器。
 import json  # 构造模拟的 CSDN 上传响应。
 from pathlib import Path  # 创建测试文档和图片路径。
+import queue  # 收集后台线程发送的预检及逐图状态事件。
 import tempfile  # 为每个测试创建隔离的临时目录。
 import threading  # 在后台运行本地 HTTP 服务。
 import time  # 验证确定的上传失败不必等待完整超时。
@@ -14,6 +15,7 @@ from types import SimpleNamespace  # 构造多标签检查所需的简化页面�
 from playwright.sync_api import sync_playwright
 
 import csdn_browser
+import app
 from csdn_browser import HelperError, choose_target, editor_text, process_article
 from md_images import IMAGE_PLACEHOLDER, restore_image_placeholders
 
@@ -929,6 +931,35 @@ class BrowserWorkflowTest(unittest.TestCase):
         self.assertEqual([state for state, _ in states], ['上传中', '上传结果待确认'])
         self.assertIn('图片已上传', states[-1][1])
 
+    def test_worker_confirms_actual_preflight_before_emitting_results(self):
+        # 作用：从后台预检确认到两张图片完成，验证真实事件顺序和结果。
+        # 使用场景：通过本地模拟编辑器覆盖界面与上传逻辑之间的接口。
+        events = queue.Queue()
+        worker = app.BrowserWorker(queue.Queue(), events)
+        worker.context = object()
+        worker.answers.put(True)
+
+        def run_local(*args, **kwargs):
+            kwargs.update(extra_hosts={'127.0.0.1'}, timeout_ms=2000)
+            return process_article(*args, **kwargs)
+
+        with patch.object(worker, '_poll_browser'), patch.object(app, 'choose_target', return_value=self.target), \
+                patch.object(app, 'process_article', side_effect=run_local):
+            worker.process(self.md, 'import', False)
+        received = []
+        while not events.empty():
+            received.append(events.get_nowait())
+        self.assertEqual(received[0][0], 'preflight')
+        mode, plan = received[0][1]
+        self.assertEqual(mode, 'import')
+        self.assertEqual([(image.path.name, image.lines) for image in plan.images],
+                         [('图片 一.png', (2,)), ('two.png', (3,))])
+        states = [(path.name, state) for kind, value in received if kind == 'image_status'
+                  for path, state, reason in (value,)]
+        self.assertEqual(states, [('图片 一.png', '上传中'), ('图片 一.png', '已上传并替换'),
+                                  ('two.png', '上传中'), ('two.png', '已上传并替换')])
+        self.assertEqual(received[-1][0], 'success')
+        self.assertEqual(TestServer.uploads, [b'fake-image-A', b'fake-image-B'])
 
 
 if __name__ == '__main__':
