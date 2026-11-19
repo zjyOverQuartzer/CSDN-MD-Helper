@@ -869,5 +869,30 @@ class BrowserWorkflowTest(unittest.TestCase):
             choose_target(context)  # 多个候选页面时不能自动选择。
 
 
+    def test_changed_image_after_preflight_stops_before_import(self):
+        # 作用：预检之后图片被移动时，不能按过期清单覆盖已有正文。
+        # 使用场景：用户检查清单期间，本地图片文件发生变化。
+        self.fill_target('原有正文')
+        text = self.md.read_text(encoding='utf-8')
+        plan = csdn_browser.image_preflight(text, self.md)
+        (self.root / 'two.png').unlink()
+        with self.assertRaisesRegex(HelperError, '图片状态在检查后发生变化'):
+            self.run_process(mode='import', expected_markdown=text, expected_preflight=plan)
+        self.assertEqual(editor_text(self.target), '原有正文')
+        self.assertEqual(TestServer.uploads, [])
+        self.assertFalse((self.root / 'recovery').exists())
+
+    def test_changed_markdown_after_preflight_stops_before_import(self):
+        # 作用：预检确认后文档正文发生变化时，不能导入未经检查的新内容。
+        # 使用场景：用户在检查弹窗打开期间继续编辑本地文档。
+        self.fill_target('原有正文')
+        text = self.md.read_text(encoding='utf-8')
+        plan = csdn_browser.image_preflight(text, self.md)
+        self.md.write_text(text + '新的文字', encoding='utf-8')
+        with self.assertRaisesRegex(HelperError, 'Markdown 在检查后发生变化'):
+            self.run_process(mode='import', expected_markdown=text, expected_preflight=plan)
+        self.assertEqual(editor_text(self.target), '原有正文')
+        self.assertEqual(TestServer.uploads, [])
+
 if __name__ == '__main__':
     unittest.main()  # 直接运行该文件时执行其中的测试。

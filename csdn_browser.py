@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64  # 将本地图片字节编码后传入浏览器页面。
+from bisect import bisect_left  # 将图片字符位置快速转换为正文行号。
 from collections import deque  # 按顺序缓存页面收到的网络响应。
 from dataclasses import dataclass  # 定义结构化的处理结果。
 from datetime import datetime  # 为正文备份生成时间标识。
@@ -37,6 +38,23 @@ class ProcessingCancelled(HelperError):
     # 作用：区分用户主动停止与上传错误。
     # 使用场景：在正文安全检查点收到停止请求时抛出，由界面显示停止结果。
     pass
+
+
+@dataclass(frozen=True)
+class PreflightImage:
+    # 作用：保存一张本地图片的路径、所有引用行号和缺失状态。
+    # 使用场景：处理前向用户展示，也用于确认之后检查图片状态是否发生变化。
+    path: Path
+    lines: tuple[int, ...]
+    missing: bool
+
+
+@dataclass(frozen=True)
+class ImagePreflight:
+    # 作用：保存一次正文检查的完整图片清单和引用总数。
+    # 使用场景：在后台线程与桌面界面之间传递不可变的检查结果。
+    images: tuple[PreflightImage, ...]
+    reference_count: int
 
 
 @dataclass(frozen=True)
@@ -117,6 +135,31 @@ def scan_local_images(body: str, markdown_path: Path):
             # 路径无效或操作系统无法解析时，附上原始引用方便排查。
             raise HelperError(f'无法读取图片路径：{ref.source}\n{exc}') from exc
     return refs_by_path, missing  # 由调用者决定如何处理缺图。
+
+
+def read_markdown(markdown_path: Path) -> str:
+    # 作用：按统一的编码读取 Markdown，并将读取错误转为用户可理解的提示。
+    # 使用场景：文件预检和正式处理均调用，避免两处对编码的判断不一致。
+    try:
+        return markdown_path.read_text(encoding='utf-8-sig')
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HelperError(f'无法读取 Markdown 文件（请使用 UTF-8 编码）：{exc}') from exc
+
+
+def image_preflight(body: str, markdown_path: Path, *, refs_by_path=None, missing=None) -> ImagePreflight:
+    # 作用：将正文中的本地图片整理为去重后的路径、引用行号和缺失状态。
+    # 使用场景：处理前检查文件或编辑器正文；正式处理时可复用已扫描结果。
+    if refs_by_path is None or missing is None:
+        refs_by_path, missing = scan_local_images(body, markdown_path)
+    missing_paths = set(missing)
+    newline_positions = [index for index, character in enumerate(body) if character == '\n']
+    images = []
+    for path, refs in refs_by_path.items():
+        # placeholder_at 紧跟图片起始标记；引用式及多行 HTML 要显示标记所在行。
+        positions = (ref.placeholder_at - 1 if ref.placeholder_at is not None else ref.start for ref in refs)
+        lines = tuple(bisect_left(newline_positions, position) + 1 for position in positions)
+        images.append(PreflightImage(path, lines, path in missing_paths))
+    return ImagePreflight(tuple(images), sum(len(refs) for refs in refs_by_path.values()))
 
 
 def collect_local_images(body: str, markdown_path: Path):
@@ -883,7 +926,9 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
                     notify=lambda message: None, *, timeout_ms: int = 60_000,
                     extra_hosts: set[str] | None = None, mode: str = 'auto',
                     expected_before: str | None = None,
-                    backup_existing: bool = True, cancel_event=None) -> ProcessResult:
+                    backup_existing: bool = True, cancel_event=None,
+                    expected_markdown: str | None = None,
+                    expected_preflight: ImagePreflight | None = None) -> ProcessResult:
     # 作用：组织正文导入、图片保护、上传、逐步替换和资源清理。
     # 使用场景：界面要求导入文档或修复现有正文时调用；成功返回 ProcessResult。
     # 参数：target 是目标编辑页；markdown_path 决定文档和图片的相对路径基准。
@@ -892,11 +937,9 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
     # backup_existing 控制是否备份已有正文；extra_hosts 主要用于本地模拟测试。
     # cancel_event 仅在写入前和图片处理之间生效，避免中途打断一次上传。
     """Import text first, then upload and replace each image in the same tab."""
-    try:  # 无论导入还是修复，都需要文档路径作为本地图片的解析基准。
-        md_text = markdown_path.read_text(encoding='utf-8-sig')  # 支持 UTF-8 文档及可选 BOM。
-    except (OSError, UnicodeDecodeError) as exc:
-        # 把文件读取或编码错误转换成可直接展示给用户的提示。
-        raise HelperError(f'无法读取 Markdown 文件（请使用 UTF-8 编码）：{exc}') from exc
+    md_text = read_markdown(markdown_path)  # 两种模式都需要文档路径作为图片解析基准。
+    if expected_markdown is not None and md_text != expected_markdown:
+        raise HelperError('所选 Markdown 在检查后发生变化，未修改正文；请重新检查。')
 
     # expected_before 是用户确认时的正文；这之后若被改动，不能继续导入。
     before = editor_text(target)  # 处理开始时再次读取目标页面正文。
@@ -911,6 +954,10 @@ def process_article(target, markdown_path: Path, recovery_dir: Path,
     imported = mode == 'import' or (mode == 'auto' and not has_meaningful_text(before))  # 确定正文来源。
     body = md_text if imported else restore_image_placeholders(before)  # 修复时先还原旧保护标记。
     refs_by_path, missing = scan_local_images(body, markdown_path)  # 按本地路径分组并收集缺图。
+    if expected_preflight is not None:
+        current_preflight = image_preflight(body, markdown_path, refs_by_path=refs_by_path, missing=missing)
+        if current_preflight != expected_preflight:
+            raise HelperError('正文或图片状态在检查后发生变化，未修改正文；请重新检查。')
     local_refs = [ref for refs in refs_by_path.values() for ref in refs]  # 展开为全部本地图片引用。
     # CSDN 会立即把粘贴的本地图片转成失败占位图，因此先暂时拆开图片标记。
     # 路径和原文仍被保留，拿到 CSDN 地址后再逐处恢复并替换。

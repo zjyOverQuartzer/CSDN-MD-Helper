@@ -5,6 +5,7 @@ from pathlib import Path  # 构造测试文档与图片路径。
 
 from md_images import (IMAGE_PLACEHOLDER, find_images, local_path, render_image_progress,
                        restore_image_placeholders, rewrite)
+from csdn_browser import image_preflight
 
 
 # 使用临时目录验证 Markdown 解析、路径解析和图片标记恢复。
@@ -150,6 +151,21 @@ class MarkdownImagesTest(unittest.TestCase):
         self.assertIn('![普通](https://i-blog.csdnimg.cn/a.png "标题")', partial)  # 已上传图片使用新网址。
         # 验证未上传的 HTML 图片标记含有可恢复的保护字符。
         self.assertIn('<' + IMAGE_PLACEHOLDER + 'img src="./b.png"', partial)  # 未完成的 HTML 图片继续受保护。
+
+
+    def test_preflight_groups_references_and_reports_original_lines(self):
+        # 作用：检查重复图片、缺图、引用式图片及多行 HTML 的原始行号。
+        # 使用场景：处理前清单需要展示每张图片的全部引用位置。
+        (self.root / 'a.png').write_bytes(b'image')
+        text = ('# 文档\n![一](a.png)\n<img\n  src="missing.png">\n'
+                '![再](a.png)\n![引用][ref]\n[ref]: missing.png\n')
+        plan = image_preflight(text, self.md)
+        self.assertEqual(plan.reference_count, 4)
+        self.assertEqual(len(plan.images), 2)
+        self.assertEqual((plan.images[0].path.name, plan.images[0].lines, plan.images[0].missing),
+                         ('a.png', (2, 5), False))
+        self.assertEqual((plan.images[1].path.name, plan.images[1].lines, plan.images[1].missing),
+                         ('missing.png', (3, 6), True))
 
 
 if __name__ == '__main__':
