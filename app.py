@@ -362,6 +362,10 @@ class ImageStatusTable(ttk.Frame):
                                               style='Slim.Horizontal.TScrollbar')
         self.horizontal_scroll.grid(row=1, column=0, sticky='ew')
         self.tree.configure(yscrollcommand=self._sync_vertical_scroll, xscrollcommand=self._sync_horizontal_scroll)
+        # 表格列会随窗口伸展；固定容器的初始请求尺寸，防止伸展后的列宽反向挤压旁边的操作区。
+        # 容器仍可随父级放大或缩小，图片较多和窗口较窄时继续使用滚动条。
+        table_frame.configure(width=self.tree.winfo_reqwidth(), height=self.tree.winfo_reqheight())
+        table_frame.grid_propagate(False)
         self.tree.tag_configure('problem', foreground=colors['warning'])
         self.tree.tag_configure('success', foreground=colors['success'])
         self.empty_label = tk.Label(table_frame, text='选择 Markdown 文件后，这里会显示图片清单',

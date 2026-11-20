@@ -462,6 +462,43 @@ class AppUiTest(unittest.TestCase):
         dialog.after(30, dialog.continue_button.invoke)
         self.assertTrue(dialog.ask())
 
+    def test_repeated_preflight_keeps_two_column_widths_stable(self):
+        # 作用：防止多次开始处理并关闭预检后，右侧表格挤压左侧操作区。
+        # 使用场景：大窗口中连续检查同一份多图文档时，保留原有的双栏布局。
+        self.window.geometry('2200x1100')
+        self.window.update()
+        path = self.make_document()
+        plan = app.image_preflight('\n'.join(f'![图片{i}](image{i}.png)' for i in range(3)), path)
+        self.window.markdown_path.set(str(path))
+        self.window.browser_open = True
+        self.window.current_browser = self.window.browser.get()
+        self.window.results_tab_button.invoke()
+        self.window.update()
+        self.assertFalse(self.window._stacked_layout)
+        initial_width = self.window.task_panel.winfo_width()
+        ask = app.PreflightDialog.ask
+
+        def return_to_check(dialog):
+            # 作用：模拟用户在真正的预检窗口中点击“返回检查”。
+            # 使用场景：回归测试保持与实际窗口创建和销毁一致。
+            dialog.attributes('-alpha', 0.0)  # 只操作测试窗口，不遮挡用户正在使用的界面。
+            dialog.after(20, dialog.cancel_button.invoke)
+            return ask(dialog)
+
+        for iteration in range(4):
+            with self.subTest(iteration=iteration):
+                self.window.process_button.invoke()
+                self.assertEqual(self.window.commands.get_nowait()[0], 'process')
+                self.window.events.put(('preflight', ('import', plan)))
+                with patch.object(app.PreflightDialog, 'ask', return_to_check):
+                    self.drain_events()
+                self.assertFalse(self.window.worker.answers.get_nowait())
+                self.window.events.put(('idle', ''))
+                self.drain_events()
+                self.window.update()
+                self.assertFalse(self.window._stacked_layout)
+                self.assertAlmostEqual(self.window.task_panel.winfo_width(), initial_width, delta=2)
+
     def test_record_tabs_and_percentage_keep_existing_results(self):
         # 作用：验证新版标签按钮、进度百分比和图片结果之间的联动。
         # 使用场景：用户在处理日志与逐图清单之间反复切换。
