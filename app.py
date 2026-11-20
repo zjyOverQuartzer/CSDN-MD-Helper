@@ -858,9 +858,6 @@ class Application(tk.Tk):
         self.process_button = ttk.Button(left, text='开始处理正文与图片', command=self.process,
                                           style='Primary.TButton')
         self.process_button.pack(fill='x', pady=(14, 0))
-        self.cancel_button = ttk.Button(left, text='停止处理', command=self.request_stop,
-                                       style='Secondary.TButton', state='disabled')
-        self.cancel_button.pack(anchor='w', pady=(7, 0))
 
         # 进度摘要、可见百分比和状态说明集中在同一张浅色卡片里。
         self._section_heading(right, '处理进度', 'progress', colors['progress_surface'])
@@ -928,7 +925,7 @@ class Application(tk.Tk):
         self.bind('<MouseWheel>', self._scroll_page, add='+')
         for widget in (self.file_entry, self.file_button, self.browser_combo, self.open_button,
                        self.import_radio, self.repair_radio, self.backup_checkbox, self.process_button,
-                       self.cancel_button, self.log_tab_button, self.results_tab_button,
+                       self.log_tab_button, self.results_tab_button,
                        self.image_table.tree, self.image_table.details):
             widget.bind('<FocusIn>', lambda event: self.after_idle(self._ensure_widget_visible, event.widget), add='+')
 
@@ -1225,11 +1222,14 @@ class Application(tk.Tk):
         self.busy = value
         state = 'disabled' if value else 'normal'  # Tk 控件使用字符串表示启用状态。
         self.open_button.configure(state=state)  # 切换“打开 CSDN”按钮。
-        self.process_button.configure(state=state)  # 切换“开始处理”按钮。
-        can_stop = value and self.active_action == 'process' and not self.worker.cancel_event.is_set()
-        self.cancel_button.configure(state='normal' if can_stop else 'disabled',
-                                     text='正在停止…' if value and self.active_action == 'process'
-                                     and self.worker.cancel_event.is_set() else '停止处理')
+        if value and self.active_action == 'process':
+            # 同一按钮在处理期间变为安全停止入口；请求后避免重复点击。
+            stopping = self.worker.cancel_event.is_set()
+            self.process_button.configure(text='正在暂停…' if stopping else '暂停处理',
+                                          command=self.request_stop, state='disabled' if stopping else 'normal')
+        else:
+            # 空闲时恢复开始功能；打开浏览器期间不可启动处理。
+            self.process_button.configure(text='开始处理正文与图片', command=self.process, state=state)
         self.backup_checkbox.configure(state=state)  # 切换备份选项。
         self.file_entry.configure(state=state)  # 处理期间固定所选文档路径。
         self.file_button.configure(state=state)  # 处理期间不能选择另一份文档。
@@ -1281,13 +1281,13 @@ class Application(tk.Tk):
 
     def request_stop(self):
         # 作用：向后台任务发送停止请求，同时说明当前上传仍需结束。
-        # 使用场景：用户在处理正文与图片期间点击“停止处理”。
+        # 使用场景：用户在处理正文与图片期间点击“暂停处理”。
         if not self.busy or self.active_action != 'process' or self.worker.cancel_event.is_set():
             return
         self.worker.cancel_event.set()
-        self.cancel_button.configure(state='disabled', text='正在停止…')
-        self.progress_text.set('正在停止…')
-        message = '已请求停止，当前图片处理完成或超时后停止。'
+        self.process_button.configure(state='disabled', text='正在暂停…')
+        self.progress_text.set('正在暂停…')
+        message = '已请求暂停，当前图片处理完成或超时后安全停止。'
         self.status.set(message)
         self.append_log(message)
 
@@ -1307,7 +1307,7 @@ class Application(tk.Tk):
                     if self.active_action == 'process':
                         self._update_progress(message)
                         if stopping:
-                            self.progress_text.set('正在停止…')
+                            self.progress_text.set('正在暂停…')
                 elif kind == 'ready':  # 浏览器启动成功。
                     # 后台已经成功打开浏览器，允许后续处理文章。
                     self.browser_open = True

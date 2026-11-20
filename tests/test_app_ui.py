@@ -225,6 +225,8 @@ class AppUiTest(unittest.TestCase):
         self.assertTrue(self.window.busy)
         self.assertEqual(str(self.window.file_button.cget('state')), 'disabled')
         self.assertEqual(str(self.window.repair_radio.cget('state')), 'disabled')
+        self.assertEqual(self.window.process_button.cget('text'), '开始处理正文与图片')
+        self.assertEqual(str(self.window.process_button.cget('state')), 'disabled')
 
         self.window.events.put(('ready', 'Google Chrome'))
         self.window.events.put(('idle', ''))
@@ -241,22 +243,29 @@ class AppUiTest(unittest.TestCase):
         self.window.process_button.invoke()
         self.assertEqual(self.window.commands.get_nowait(), ('process', (path, 'repair', False)))
         self.assertEqual(self.window.progress_text.get(), '正在准备…')
-        self.assertEqual(str(self.window.process_button.cget('state')), 'disabled')
+        self.assertEqual(str(self.window.process_button.cget('state')), 'normal')
+        self.assertEqual(self.window.process_button.cget('text'), '暂停处理')
 
-    def test_stop_button_requests_safe_stop_and_resets_for_next_task(self):
-        # 作用：检查停止按钮、等待提示和下一次任务的状态恢复。
+    def test_process_button_requests_safe_stop_and_resets_for_next_task(self):
+        # 作用：检查同一个按钮在开始、暂停请求、结束和下次处理之间切换。
         # 使用场景：用户在上传期间请求安全停止，随后再次处理文章。
-        self.assertEqual(str(self.window.cancel_button.cget('state')), 'disabled')
+        self.assertFalse(hasattr(self.window, 'cancel_button'))
+        self.assertEqual(self.window.process_button.cget('text'), '开始处理正文与图片')
+        self.assertEqual(str(self.window.process_button.cget('state')), 'normal')
         path = self.make_document()
         self.window.markdown_path.set(str(path))
         self.window.browser_open = True
         self.window.current_browser = self.window.browser.get()
         self.window.process_button.invoke()
         self.window.commands.get_nowait()
-        self.assertEqual(str(self.window.cancel_button.cget('state')), 'normal')
-        self.window.cancel_button.invoke()
+        self.assertEqual(self.window.process_button.cget('text'), '暂停处理')
+        self.assertEqual(str(self.window.process_button.cget('state')), 'normal')
+        self.window.process_button.invoke()
         self.assertTrue(self.window.worker.cancel_event.is_set())
-        self.assertEqual(str(self.window.cancel_button.cget('state')), 'disabled')
+        self.assertEqual(self.window.process_button.cget('text'), '正在暂停…')
+        self.assertEqual(str(self.window.process_button.cget('state')), 'disabled')
+        self.window.process_button.invoke()
+        self.assertTrue(self.window.commands.empty())
         self.assertIn('当前图片', self.window.status.get())
         self.window.events.put(('log', '已替换 1/2 张图片的链接。'))
         self.window.events.put(('cancelled', '已安全停止，已完成 1/2 张图片。'))
@@ -266,8 +275,11 @@ class AppUiTest(unittest.TestCase):
         self.assertEqual(self.window.progress_text.get(), '已停止')
         self.assertEqual(self.window.progress_value.get(), 50)
         self.assertFalse(self.window.busy)
+        self.assertEqual(self.window.process_button.cget('text'), '开始处理正文与图片')
+        self.assertEqual(str(self.window.process_button.cget('state')), 'normal')
         self.window.process_button.invoke()
         self.assertFalse(self.window.worker.cancel_event.is_set())
+        self.assertEqual(self.window.process_button.cget('text'), '暂停处理')
 
     def test_progress_tracks_completed_images_and_preserves_error_state(self):
         # 作用：验证上传中、已替换和出错时的进度文字与百分比。
