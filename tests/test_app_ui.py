@@ -479,6 +479,38 @@ class AppUiTest(unittest.TestCase):
         self.assertEqual(self.window.output_notebook.select(), str(self.window.log_tab))
         self.assertIn('原 Markdown 文件不会被改写', self.window.log.get('1.0', 'end'))
 
+    def test_image_list_scrollbar_appears_only_when_needed_and_can_be_dragged(self):
+        # 作用：检查图片清单的滚动条显隐、拖动和清空后的恢复。
+        # 使用场景：图片数量或窗口高度变化时，既不显示空轨道也不影响查看末尾。
+        path = self.make_document()
+        self.window.results_tab_button.invoke()
+        table = self.window.image_table
+        table.set_preflight(app.image_preflight('![图片](one.png)', path))
+        self.window.update()
+        self.assertFalse(table.vertical_scroll.winfo_ismapped())
+
+        text = '\n'.join(f'![图片{i}](image{i}.png)' for i in range(40))
+        table.set_preflight(app.image_preflight(text, path))
+        self.window.update()
+        scroll = table.vertical_scroll
+        self.assertTrue(scroll.winfo_ismapped())
+        width, height = scroll.winfo_width(), scroll.winfo_height()
+        parts = [scroll.identify(width // 2, y) for y in range(height)]
+        thumb = [y for y, part in enumerate(parts) if 'thumb' in part.lower()]
+        self.assertTrue(thumb, '应显示可以拖动的滑块')
+        self.assertFalse(any('arrow' in part.lower() for part in parts))
+        start_y = thumb[len(thumb) // 2]
+        end_y = min(height - 2, start_y + height // 2)
+        scroll.event_generate('<ButtonPress-1>', x=width // 2, y=start_y)
+        scroll.event_generate('<B1-Motion>', x=width // 2, y=end_y)
+        scroll.event_generate('<ButtonRelease-1>', x=width // 2, y=end_y)
+        self.window.update()
+        self.assertGreater(table.tree.yview()[0], 0)
+
+        table.clear()
+        self.window.update()
+        self.assertFalse(scroll.winfo_ismapped())
+
     def test_preflight_list_reaches_last_image(self):
         # 作用：检查图片较多时，用户仍可滚动到并选中清单末尾。
         # 使用场景：处理多图文档，避免重新设计后只看得到最前几张图片。

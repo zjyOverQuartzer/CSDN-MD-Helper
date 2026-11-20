@@ -4,6 +4,7 @@
 # md_images 负责识别 Markdown 中的图片和本地路径。
 from __future__ import annotations
 
+import math  # 计算滚动条滑块的圆角。
 import os  # 读取 Windows 用户数据目录等环境信息。
 from pathlib import Path  # 以跨平台方式拼接和检查文件路径。
 import queue  # 在线程之间安全传递任务、事件和确认结果。
@@ -354,13 +355,13 @@ class ImageStatusTable(ttk.Frame):
             self.tree.heading(column, text=title, anchor='w')
             self.tree.column(column, width=width, minwidth=75, stretch=(column == 'image'))
         self.tree.grid(row=0, column=0, sticky='nsew')
-        vertical = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview,
-                                 style='Slim.Vertical.TScrollbar')
-        vertical.grid(row=0, column=1, sticky='ns')
+        self.vertical_scroll = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview,
+                                            style='Slim.Vertical.TScrollbar')
+        self.vertical_scroll.grid(row=0, column=1, sticky='ns')
         self.horizontal_scroll = ttk.Scrollbar(table_frame, orient='horizontal', command=self.tree.xview,
                                               style='Slim.Horizontal.TScrollbar')
         self.horizontal_scroll.grid(row=1, column=0, sticky='ew')
-        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=self._sync_horizontal_scroll)
+        self.tree.configure(yscrollcommand=self._sync_vertical_scroll, xscrollcommand=self._sync_horizontal_scroll)
         self.tree.tag_configure('problem', foreground=colors['warning'])
         self.tree.tag_configure('success', foreground=colors['success'])
         self.empty_label = tk.Label(table_frame, text='选择 Markdown 文件后，这里会显示图片清单',
@@ -372,6 +373,15 @@ class ImageStatusTable(ttk.Frame):
         self._images_by_item = {}
         self._reasons_by_item = {}
         self._set_details('选中图片后，可在这里查看完整路径和处理说明。')
+
+    def _sync_vertical_scroll(self, first, last):
+        # 作用：仅在图片清单超出可见高度时显示纵向滚动条。
+        # 使用场景：图片数量或窗口大小变化时，由表格自动通知。
+        self.vertical_scroll.set(first, last)
+        if float(first) > 0 or float(last) < 1:
+            self.vertical_scroll.grid()
+        else:
+            self.vertical_scroll.grid_remove()
 
     def _sync_horizontal_scroll(self, first, last):
         # 作用：只在表格内容超出宽度时显示横向滚动条。
@@ -753,10 +763,7 @@ class Application(tk.Tk):
                         background=colors['brand_light'], foreground=colors['warning'], padding=(14, 7),
                         borderwidth=0, focuscolor=colors['brand'])
         style.map('WorkspaceSelected.TButton', background=[('active', colors['brand_light'])])
-        for orientation in ('Vertical', 'Horizontal'):
-            style.configure(f'Slim.{orientation}.TScrollbar', background='#D9D1CB',
-                            troughcolor=colors['surface'], bordercolor=colors['surface'],
-                            darkcolor='#D9D1CB', lightcolor='#D9D1CB', gripcount=0, arrowsize=8, width=8)
+        self._configure_scrollbars(style)
 
         # 标题区使用本地矢量标识，与操作区的线条图标保持一致。
         self.header = tk.Frame(self, background=colors['page'], padx=24, pady=14)
@@ -937,6 +944,44 @@ class Application(tk.Tk):
         self.log_tab_button.configure(style='WorkspaceTab.TButton' if showing_results else 'WorkspaceSelected.TButton')
         self.results_tab_button.configure(style='WorkspaceSelected.TButton' if showing_results else 'WorkspaceTab.TButton')
         self._schedule_page_layout()
+
+    def _configure_scrollbars(self, style: ttk.Style):
+        # 作用：为原生 ttk 滚动条设置无箭头的圆角滑块和浅色轨道。
+        # 使用场景：主界面和预检窗口共用；拖动、键盘和滚轮仍由 Tk 处理。
+        thickness = self._dpi_pixels(14)
+        length = self._dpi_pixels(26)
+        margin = self._dpi_pixels(3)
+        radius = max(1.0, (thickness - 2 * margin) / 2)
+        self._scrollbar_images = []  # Tk 的图片需要保留引用，避免被回收。
+        for orientation in ('Vertical', 'Horizontal'):
+            images = []
+            for color in ('#928A83', '#C84D2C', '#A83A20'):
+                width, height = ((thickness, length) if orientation == 'Vertical' else (length, thickness))
+                image = tk.PhotoImage(master=self, width=width, height=height)
+                for position in range(length):
+                    # 只画胶囊形滑块，四角保持透明，拉伸后仍保留圆角。
+                    distance = max(radius - position - 0.5, position + 0.5 - (length - radius), 0)
+                    inset = math.ceil(radius - math.sqrt(max(0, radius * radius - distance * distance)))
+                    start, end = margin + inset, thickness - margin - inset
+                    if start < end:
+                        area = ((start, position, end, position + 1) if orientation == 'Vertical'
+                                else (position, start, position + 1, end))
+                        image.put(color, to=area)
+                images.append(image)
+            self._scrollbar_images.extend(images)
+            element = f'Csdn.{orientation}.Scrollbar.thumb'
+            cap = math.ceil(radius)
+            border = (0, cap, 0, cap) if orientation == 'Vertical' else (cap, 0, cap, 0)
+            style.element_create(element, 'image', images[0], ('pressed', images[2]), ('active', images[1]),
+                                 border=border, sticky='nswe')
+            axis = 'ns' if orientation == 'Vertical' else 'ew'
+            style.layout(f'Slim.{orientation}.TScrollbar', [
+                (f'{orientation}.Scrollbar.trough', {'sticky': axis, 'children': [
+                    (element, {'expand': True, 'sticky': 'nswe'})]})])
+            style.configure(f'Slim.{orientation}.TScrollbar', troughcolor=UI_COLORS['panel'],
+                            background=UI_COLORS['panel'], bordercolor=UI_COLORS['panel'],
+                            lightcolor=UI_COLORS['panel'], darkcolor=UI_COLORS['panel'],
+                            borderwidth=0, relief='flat', width=thickness)
 
     def _configure_choice_indicators(self, style: ttk.Style):
         # 作用：使用较大的 Windows 原生单选圆点与带对号的复选框。
