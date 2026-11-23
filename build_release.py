@@ -25,9 +25,12 @@ VERSION = '0.2.0'
 EXE_NAME = 'CSDN-Markdown-Helper.exe'
 PYTHON_PACKAGES = ('playwright', 'pyee', 'greenlet', 'typing-extensions',
                    'markdown-it-py', 'mdurl', 'pyinstaller')
+# README 在仓库和发行压缩包中都使用相同的相对图片路径。
+README_IMAGES = ('docs/images/main-window.png', 'docs/images/preflight.png')
 # 只把明确列出的源码打入发行包，避免把浏览器登录数据或私人文档一起分发。
 SOURCE_FILES = (
     'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', '.gitignore',
+    *README_IMAGES,
     '.github/workflows/windows-ci.yml',
     'requirements.txt', 'requirements-build.txt', 'dpi-aware.manifest',
     'app.py', 'csdn_browser.py', 'md_images.py', 'packaged_main.py',
@@ -194,7 +197,7 @@ def _create_distribution(output: Path, executable: Path, sources: dict[str, byte
     native_libraries = sorted(name for name in archive.toc if name.lower().endswith(('.dll', '.pyd')))
     with ZipFile(temporary, 'w', compression=ZIP_DEFLATED, compresslevel=6) as bundle:
         bundle.write(executable, EXE_NAME, compress_type=ZIP_STORED)
-        for name in ('LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md'):
+        for name in ('LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', *README_IMAGES):
             bundle.writestr(name, sources[name])
         for name, data in sources.items():
             bundle.writestr(f'source/{name}', data)

@@ -5,6 +5,7 @@ import importlib.util
 import tempfile
 import unittest
 from unittest.mock import patch
+from zipfile import ZipFile
 
 if importlib.util.find_spec('PyInstaller') is not None:
     import build_release
@@ -64,6 +65,26 @@ class BuildReleaseTest(unittest.TestCase):
         source.write_text('later edit', encoding='utf-8')
         self.assertEqual(captured['app.py'], b'first version')
         self.assertEqual((snapshot / 'app.py').read_bytes(), b'first version')
+
+    def test_distribution_includes_readme_images_in_both_readme_locations(self):
+        # 作用：保证发行包根目录与源码目录中的 README 都能找到相对路径图片。
+        # 使用场景：离线解压发行包后阅读说明，或打开随包附带的源码时。
+        executable = self.root / 'helper.exe'
+        executable.write_bytes(b'example executable')
+        output = self.root / 'dist'
+        output.mkdir()
+        sources = {name: name.encode('utf-8') for name in
+                   ('LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', *build_release.README_IMAGES)}
+        with patch.object(build_release, 'CArchiveReader') as archive, \
+                patch.object(build_release, '_package_licenses', return_value=({}, [])):
+            archive.return_value.toc = {}
+            destination = build_release._create_distribution(output, executable, sources)
+        with ZipFile(destination) as package:
+            for name in build_release.README_IMAGES:
+                with self.subTest(image=name):
+                    self.assertIn(name, build_release.SOURCE_FILES)
+                    self.assertEqual(package.read(name), sources[name])
+                    self.assertEqual(package.read(f'source/{name}'), sources[name])
 
     def test_snapshot_rejects_link_to_outside_directory(self):
         # 作用：避免源码白名单穿过目录链接而收集项目外的文件。
