@@ -3,6 +3,7 @@
 # 本模块负责识别图片、定位本地文件并生成替换后的文本，不负责网络上传。
 from __future__ import annotations
 
+from bisect import bisect_right  # 在原文行号和 HTML 块区间中定位字符位置。
 from dataclasses import dataclass  # 使用数据类集中保存图片引用信息。
 import html  # 处理 HTML 实体及输出地址中的特殊字符。
 from html.parser import HTMLParser  # 解析 HTML 标签，避免把 data-src 当成 src。
@@ -17,6 +18,16 @@ from markdown_it import MarkdownIt  # 识别代码块，保留列表与引用中
 # 这样编辑器不会提前处理本地路径；上传完成或重试时仍可恢复原始标记。
 IMAGE_PLACEHOLDER = '\u200b\u2060'
 _MARKDOWN_BLOCK_PARSER = MarkdownIt('commonmark')  # 只使用块级结果，不改写文章内容。
+_validate_markdown_link = _MARKDOWN_BLOCK_PARSER.validateLink
+
+
+def _validate_reference_link(url: str) -> bool:
+    # 作用：允许块级解析器记录本地 file: 引用，其他协议沿用原有校验。
+    # 使用场景：读取引用定义；这里不打开链接，本地路径仍由 local_path 判断。
+    return url.lower().startswith('file:') or _validate_markdown_link(url)
+
+
+_MARKDOWN_BLOCK_PARSER.validateLink = _validate_reference_link
 
 
 @dataclass(frozen=True)
@@ -42,9 +53,9 @@ class ImageRef:
         return html.escape(url, quote=True)  # 转义引号等字符，避免破坏 HTML 属性。
 
 
-def _masked_markdown(text: str) -> str:
+def _masked_markdown(text: str):
     # 作用：用等长空格遮住代码块、行内代码及 HTML 注释。
-    # 使用场景：扫描图片前调用，避免把示例代码当作真实图片，且保留原文坐标。
+    # 使用场景：扫描图片前调用，同时返回 HTML 块和引用定义，保留原文坐标。
     """Keep offsets while hiding code blocks, inline code and HTML comments."""
     chars = list(text)  # 字符串不可原地修改，先转成可按位置修改的列表。
 
@@ -59,13 +70,20 @@ def _masked_markdown(text: str) -> str:
     # 用 Markdown 块级解析结果判断代码块，不能简单把四个空格都视作代码：
     # 列表项和引用中也可能有正常缩进，解析器能保留这些上下文。
     line_starts = [0] + [match.end() for match in re.finditer(r'\r\n|\r|\n', text)]
-    for token in _MARKDOWN_BLOCK_PARSER.parse(text):
-        if token.type not in {'code_block', 'fence'} or token.map is None:
+    environment = {}  # 每篇文章使用独立环境，避免引用定义在文档间串用。
+    html_blocks = []  # 保存原始 HTML 块范围，稍后只遮住其中的 pre 示例。
+    for token in _MARKDOWN_BLOCK_PARSER.parse(text, environment):
+        if token.map is None or token.type not in {'code_block', 'fence', 'html_block'}:
             continue
         start_line, end_line = token.map  # Markdown 解析器返回左闭右开的行区间。
         start = line_starts[start_line]
         end = line_starts[end_line] if end_line < len(line_starts) else len(text)
-        mask(start, end)  # 转回原文字符区间，保持后续替换的坐标不变。
+        if token.type == 'html_block':
+            # pre 自身构成 HTML 块时，整块 Markdown 语法都是原样文本。
+            pre_root = bool(re.match(r'^\s*<pre(?=[\s/>])', token.content, re.IGNORECASE))
+            html_blocks.append((start, end, pre_root))
+        else:
+            mask(start, end)  # 转回原文字符区间，保持后续替换的坐标不变。
 
     masked = "".join(chars)  # 把当前遮罩列表转回字符串供正则查找。
     for match in re.finditer(r"<!--[\s\S]*?(?:-->|\Z)", masked):
@@ -95,21 +113,21 @@ def _masked_markdown(text: str) -> str:
             index = end  # 下次从这段代码之后继续扫描。
         else:
             index = run_end  # 没有结束符时，按普通文本跳过当前反引号序列。
-    return "".join(chars)  # 返回长度和换行位置不变的遮罩文本。
+    return "".join(chars), html_blocks, environment.get('references', {}), line_starts
 
 
 def _label(value: str) -> str:
     # 作用：规范化引用式链接的标签。
     # 使用场景：保存或查找引用定义时调用，合并空白并忽略大小写。
-    # 引用式链接的标签按空白合并、忽略大小写的形式匹配。
-    return " ".join(value.split()).casefold()
+    # 与 Markdown 解析器的先小写再大写规则一致，处理 Unicode 标签。
+    return " ".join(value.split()).lower().upper()
 
 
-def _definitions(text: str, visible: str) -> dict[str, tuple[str, str]]:
+def _definitions(text: str, visible: str, references: dict, line_starts: list[int]) -> dict[str, tuple[str, str]]:
     # 作用：收集引用标签对应的图片路径和可选标题。
-    # 使用场景：识别引用式图片前调用；visible 用于匹配，text 提供原文内容。
+    # 使用场景：识别普通和引用块中的定义；visible 用于匹配，text 提供原文。
     # 找到 [标签]: 路径 "标题" 定义；匹配使用遮罩文本，内容从原文读取。
-    result: dict[str, tuple[str, str]] = {}  # 标签 -> (原始路径, 可选标题)。
+    candidates = []  # 保存原文位置、标签、图片路径和标题，再按出现顺序合并。
     # 正则支持尖括号路径或普通非空白路径，以及可选的引号/括号标题。
     pattern = re.compile(
         r'''(?m)^ {0,3}\[([^\]\r\n]+)\]:[ \t]*(?:<([^>\r\n]+)>|([^\s]+))'''
@@ -119,7 +137,44 @@ def _definitions(text: str, visible: str) -> dict[str, tuple[str, str]]:
     for match in pattern.finditer(visible):
         start, end = match.span(2) if match.group(2) is not None else match.span(3)  # 选中实际路径分组。
         title = text[slice(*match.span('title'))] if match.group('title') else ''  # 保留标题原文。
-        result.setdefault(_label(match.group(1)), (text[start:end], title))  # 同名标签保留首次定义。
+        candidates.append((match.start(), _label(match.group(1)), text[start:end], title))
+
+    # Markdown 解析器会正确识别嵌套引用块与跨行定义，并排除引用块内的正文续行。
+    reference_lines = {_label(name): value['map'][0] for name, value in references.items()}
+    inline_pattern = re.compile(
+        r'''\[([^\]\r\n]+)\]:[ \t]*(?:<([^>\r\n]+)>|([^\s]+))'''
+        r'''(?P<title>[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^()\r\n]*\)))?'''
+    )
+    for name, value in references.items():
+        line_number = value['map'][0]
+        start = line_starts[line_number]
+        end = line_starts[line_number + 1] if line_number + 1 < len(line_starts) else len(visible)
+        line = visible[start:end]
+        if not re.match(r'^ {0,3}>', line):
+            continue  # 普通定义沿用已有的原文解析，避免改变 Typora 路径兼容性。
+        match = next((item for item in inline_pattern.finditer(line)
+                      if _label(item.group(1)) == _label(name)), None)
+        if match:
+            # 同行定义直接保留原始路径和标题写法，包括空格、括号及引号。
+            src_start, src_end = match.span(2) if match.group(2) is not None else match.span(3)
+            source = text[start + src_start:start + src_end]
+            title_start, title_end = match.span('title')
+            title = text[start + title_start:start + title_end] if match.group('title') else ''
+        else:
+            # 跨行定义使用解析器返回的目标和标题，路径解码仍由 local_path 完成。
+            source = value['href']
+            if re.match(r'^[A-Za-z]:(?:%2[fF]|%5[cC])', source):
+                source = source[:2] + unquote(source[2:5]) + source[5:]
+            title_value = value['title'].replace('\\', '\\\\').replace('"', '\\"')
+            title = f' "{title_value}"' if title_value else ''
+        candidates.append((start, _label(name), source, title))
+
+    result: dict[str, tuple[str, str]] = {}
+    for position, name, source, title in sorted(candidates, key=lambda item: item[0]):
+        line_number = bisect_right(line_starts, position) - 1
+        if name in reference_lines and line_number != reference_lines[name]:
+            continue  # 解析器选中的首次有效定义优先，避免正文续行冒充定义。
+        result.setdefault(name, (source, title))
     return result  # 供后续图片引用按规范化标签查询。
 
 
@@ -204,22 +259,32 @@ class _HtmlImageLocator(HTMLParser):
         re.DOTALL,
     )
 
-    def __init__(self, visible: str, original: str):
+    def __init__(self, visible: str, original: str, html_blocks: list[tuple[int, int, bool]]):
         # 作用：保存等长遮罩及原文，建立 HTMLParser 行号到原文坐标的映射。
         # 使用场景：每次扫描文章时创建独立实例，避免多个文档互相影响。
         super().__init__(convert_charrefs=False)
+        self.visible = visible
         self.original = original
         self.line_starts = [0] + [match.end() for match in re.finditer('\n', visible)]
         self.refs: list[ImageRef] = []
+        self.html_blocks = html_blocks
+        self.block_starts = [start for start, _, _ in html_blocks]
+        self.pre_starts: list[int] = []
+        self.pre_spans: list[tuple[int, int]] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
         # 作用：从真实 img 标签中找到名字恰好为 src 的第一个有值属性。
-        # 使用场景：HTMLParser 读到起始标签时调用；其他标签不处理。
+        # 使用场景：HTMLParser 读到起始标签时调用，也记录 HTML 块里的 pre 范围。
+        line, column = self.getpos()
+        tag_start = self.line_starts[line - 1] + column
+        if tag == 'pre':
+            index = bisect_right(self.block_starts, tag_start) - 1
+            if index >= 0 and tag_start < self.html_blocks[index][1]:
+                self.pre_starts.append(tag_start)
+            return
         if tag != 'img':
             return
         raw = self.get_starttag_text() or ''
-        line, column = self.getpos()
-        tag_start = self.line_starts[line - 1] + column
         name = re.match(r'<\s*img\b', raw, re.IGNORECASE)
         if not name:
             return
@@ -244,13 +309,58 @@ class _HtmlImageLocator(HTMLParser):
                                           placeholder_at=tag_start + 1))
             return  # 浏览器使用第一个同名属性，后续 src 不再覆盖它。
 
+    def handle_endtag(self, tag: str) -> None:
+        # 作用：记录 pre 起止范围；不影响其中真正的 img 标签识别。
+        # 使用场景：HTMLParser 读到 pre 结束标签时调用。
+        if tag == 'pre' and self.pre_starts:
+            line, column = self.getpos()
+            tag_start = self.line_starts[line - 1] + column
+            closing = self.visible.find('>', tag_start)
+            end = closing + 1 if closing >= 0 else len(self.visible)
+            self.pre_spans.append((self.pre_starts.pop(), end))
+
+    def close(self) -> None:
+        # 作用：完成 HTML 解析，并保留未闭合 pre 的剩余范围。
+        # 使用场景：扫描完原文时调用，未闭合的原样 HTML 需要遮到块末尾。
+        super().close()
+        self.pre_spans.extend((start, len(self.visible)) for start in self.pre_starts)
+        self.pre_starts.clear()
+
+
+def _mask_preformatted_blocks(visible: str, html_blocks: list[tuple[int, int, bool]],
+                              pre_spans: list[tuple[int, int]]) -> str:
+    # 作用：只遮住 HTML 块中的 pre 示例，不影响真正的 HTML img 标签扫描。
+    # 使用场景：在查找 Markdown 图片和引用定义前调用，保留原文长度与换行。
+    ranges = [(start, end) for start, end, pre_root in html_blocks if pre_root]
+    starts = [start for start, _, _ in html_blocks]
+    for pre_start, pre_end in pre_spans:
+        index = max(0, bisect_right(starts, pre_start) - 1)
+        while index < len(html_blocks) and html_blocks[index][0] < pre_end:
+            start, end, _ = html_blocks[index]
+            if end > pre_start:
+                ranges.append((max(start, pre_start), min(end, pre_end)))
+            index += 1
+    if not ranges:
+        return visible
+    chars = list(visible)
+    for start, end in ranges:
+        for position in range(start, end):
+            if chars[position] not in '\r\n':
+                chars[position] = ' '
+    return ''.join(chars)
+
 
 def find_images(text: str) -> list[ImageRef]:
     # 作用：识别 Markdown 和 HTML 图片，并记录原文中的位置。
     # 使用场景：文件预检查和正式处理都会调用；返回按位置排序的 ImageRef 列表。
     # 先隐藏代码等不应替换的区域，再分别查找 Markdown 与 HTML 图片。
-    visible = _masked_markdown(text)  # 遮住不应识别图片的区域。
-    definitions = _definitions(text, visible)  # 建立引用式图片用到的定义表。
+    visible, html_blocks, references, line_starts = _masked_markdown(text)
+    # 先独立识别真实 HTML 图片，再遮住 pre 块里的 Markdown 示例。
+    html_images = _HtmlImageLocator(visible, text, html_blocks)
+    html_images.feed(visible)
+    html_images.close()
+    visible = _mask_preformatted_blocks(visible, html_blocks, html_images.pre_spans)
+    definitions = _definitions(text, visible, references, line_starts)
     refs: list[ImageRef] = []  # 保存识别出的全部图片引用。
     pos = 0  # 从遮罩文本的开头开始查找。
     while pos < len(visible):
@@ -294,10 +404,7 @@ def find_images(text: str) -> list[ImageRef]:
             refs.append(ImageRef(start, end_alt + 1, src, alt, title, start + 1))
         pos = end_alt + 1  # 当前标记无法继续解析时，至少跳过描述区域。
 
-    # 由 HTML 解析器区分真实 src 与 data-src，并保留原文中属性值的位置。
-    html_images = _HtmlImageLocator(visible, text)
-    html_images.feed(visible)
-    html_images.close()
+    # 合并之前单独识别的 HTML 图片，保留真实 img 的属性及原文位置。
     refs.extend(html_images.refs)
     return sorted(refs, key=lambda ref: (ref.start, ref.end))  # 合并两种语法并按原文位置排序。
 

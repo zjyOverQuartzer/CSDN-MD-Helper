@@ -280,6 +280,31 @@ class BrowserWorkflowTest(unittest.TestCase):
         self.assertIn('中间文字', text)  # 中间文字保留。
         self.assertIn('正文结束', text)  # 末尾文字保留。
 
+    def test_quoted_reference_in_import(self):
+        # 验证引用块定义可以从预检走到上传和替换。
+        text = ('正文开始\n> ![引用图][figure]\n>\n> [figure]: <图片 一.png> "图片标题"\n\n'
+                '<img src="two.png" width="280">\n正文结束')
+        self.md.write_text(text, encoding='utf-8')
+        plan = csdn_browser.image_preflight(text, self.md)
+        self.assertEqual((len(plan.images), plan.reference_count), (2, 2))
+        result = self.run_process(mode='import', expected_markdown=text, expected_preflight=plan)
+        body = editor_text(self.target)
+        self.assertEqual((result.image_count, result.reference_count), (2, 2))
+        self.assertIn('> ![引用图](https://i-blog.csdnimg.cn/mock-1.png "图片标题")', body)
+        self.assertIn('<img src="https://i-blog.csdnimg.cn/mock-2.png" width="280">', body)
+        self.assertIn('正文结束', body)
+
+    def test_preformatted_example_stops_if_editor_rewrites_it(self):
+        # 模拟 CSDN 改写示例时应停止，并且不能把示例作为图片上传。
+        text = '<pre>![示例](missing-example.png)</pre>\n\n![图片](图片 一.png)'
+        self.md.write_text(text, encoding='utf-8')
+        plan = csdn_browser.image_preflight(text, self.md)
+        self.assertEqual((len(plan.images), plan.reference_count), (1, 1))
+        with self.assertRaises(HelperError):
+            self.run_process(mode='import', expected_markdown=text, expected_preflight=plan)
+        self.assertEqual(TestServer.uploads, [])
+        self.assertEqual(self.md.read_text(encoding='utf-8'), text)
+
     def test_preserved_editor_updates_references_without_replacing_full_text(self):
         # 作用：正文仍完整时局部更新同一张图片的多种引用，避免再次整篇粘贴。
         # 使用场景：一张图片在 Markdown、HTML 和引用式语法中重复出现。

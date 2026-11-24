@@ -65,6 +65,82 @@ class MarkdownImagesTest(unittest.TestCase):
         self.assertIn('[普通链接][ref]', result)  # 同一标签的普通链接不受影响。
         self.assertIn('[ref]: ./folder/image.png', result)  # 原引用定义也不改写。
 
+    def test_reference_definitions_inside_nested_blockquotes(self):
+        # 作用：识别引用块中的完整、折叠和简写引用，保留原定义与普通链接。
+        # 使用场景：导出的 Markdown 把图片和引用定义放在同一引用块内。
+        text = ('> ![完整][fig]\r\n> ![折叠][]\r\n> ![简写]\r\n>\r\n'
+                '> [FIG]: <./目录/图 一.png> "标题"\r\n'
+                '> [折叠]: ./other.png\r\n> > [简写]: ./third.png (说明)\r\n'
+                '> [普通链接][fig]\r\n')
+        refs = find_images(text)
+        self.assertEqual([ref.source for ref in refs], ['./目录/图 一.png', './other.png', './third.png'])
+        urls = [f'https://i-blog.csdnimg.cn/{index}.png' for index in range(3)]
+        result = rewrite(text, list(zip(refs, urls)))
+        self.assertIn('> ![完整](https://i-blog.csdnimg.cn/0.png "标题")', result)
+        self.assertIn('> ![折叠](https://i-blog.csdnimg.cn/1.png)', result)
+        self.assertIn('> ![简写](https://i-blog.csdnimg.cn/2.png (说明))', result)
+        self.assertIn('> [FIG]: <./目录/图 一.png> "标题"', result)
+        self.assertIn('> [普通链接][fig]', result)
+        self.assertEqual(restore_image_placeholders(render_image_progress(text, refs, [])), text)
+
+    def test_quoted_reference_definition_with_multiline_path_and_file_url(self):
+        # 作用：处理引用块、列表和跨行定义，并继续识别本地 file: 网址。
+        # 使用场景：图片路径含空格或从其他工具导出为绝对文件网址。
+        file_url = (self.root / '文件.png').as_uri()
+        text = ('> - ![照片][pic]\n>\n>   [pic]:\n>     <./目录/带 空格.png>\n'
+                '>     "测试标题"\n\n> ![文件][file]\n>\n'
+                f'> [file]: <{file_url}> "文件标题"\n')
+        refs = find_images(text)
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(local_path(refs[0].source, self.md), (self.root / '目录' / '带 空格.png').resolve())
+        self.assertEqual(local_path(refs[1].source, self.md), (self.root / '文件.png').resolve())
+        result = rewrite(text, [(refs[0], 'https://i-blog.csdnimg.cn/photo.png'),
+                                (refs[1], 'https://i-blog.csdnimg.cn/file.png')])
+        self.assertIn('![照片](https://i-blog.csdnimg.cn/photo.png "测试标题")', result)
+        self.assertIn('![文件](https://i-blog.csdnimg.cn/file.png "文件标题")', result)
+        self.assertIn(f'> [file]: <{file_url}> "文件标题"', result)
+
+    def test_quoted_paragraph_is_not_a_reference_definition(self):
+        # 作用：引用块中只是正文续行的 [标签]: 不应变成图片定义。
+        # 使用场景：文章中展示引用定义示例，但没有真正声明该标签。
+        text = '> 这是一段正文\n> [fake]: missing.png\n\n![未定义][fake]\n'
+        self.assertEqual(find_images(text), [])
+
+    def test_first_valid_reference_definition_wins_across_blockquote(self):
+        # 作用：按 Markdown 的首次有效定义解析同名标签。
+        # 使用场景：引用块与正文中都出现相同标签，或无效正文续行先出现。
+        text = ('> 这是一段正文\n> [ref]: ignored.png\n\n'
+                '> [ref]: first.png\n\n[ref]: second.png\n\n![图片][ref]\n')
+        self.assertEqual([ref.source for ref in find_images(text)], ['first.png'])
+        unicode_text = '> ![图片][ı]\n>\n> [ı]: unicode.png\n'
+        self.assertEqual([ref.source for ref in find_images(unicode_text)], ['unicode.png'])
+
+    def test_preformatted_html_keeps_examples_but_finds_real_html_images(self):
+        # 作用：忽略 pre 块中的 Markdown 示例，仍处理真正的 HTML img 和块外图片。
+        # 使用场景：文章同时包含 HTML 格式的代码示例和需要上传的真实图片。
+        text = ('<pre class="x > y">\r\n![示例](missing.png)\r\n[bad]: missing-def.png\r\n'
+                '&lt;img src="example.png"&gt;\r\n<img src="inside-real.png" alt="真实">\r\n'
+                '</pre>\r\n\r\n![普通](visible.png)\r\n'
+                '<span>![行内](inline.png)</span>\r\n<img src="outside.png">\r\n')
+        refs = find_images(text)
+        self.assertEqual([ref.source for ref in refs], ['inside-real.png', 'visible.png', 'inline.png', 'outside.png'])
+        result = rewrite(text, [(ref, f'https://i-blog.csdnimg.cn/{index}.png')
+                                for index, ref in enumerate(refs)])
+        self.assertIn('![示例](missing.png)', result)
+        self.assertIn('[bad]: missing-def.png', result)
+        self.assertIn('&lt;img src="example.png"&gt;', result)
+        self.assertIn('<img src="https://i-blog.csdnimg.cn/0.png" alt="真实">', result)
+
+    def test_preformatted_html_inside_blockquote_or_div(self):
+        # 作用：处理嵌套 pre 和未闭合的 pre，同时保留块外真实图片。
+        # 使用场景：引用块或 HTML 容器中嵌套代码示例。
+        text = ('> <pre>\n> ![引用示例](quote-example.png)\n> </pre>\n\n'
+                '<div>\n<pre>![嵌套示例](nested-example.png)</pre>\n'
+                '<img src="inside-div.png">\n</div>\n\n![外部](outside.png)\n')
+        self.assertEqual([ref.source for ref in find_images(text)], ['inside-div.png', 'outside.png'])
+        unclosed = '<pre>\n![未闭合示例](missing.png)\n<img src="real.png">\n'
+        self.assertEqual([ref.source for ref in find_images(unclosed)], ['real.png'])
+
     # 相对路径、绝对路径和 file: 地址能定位；网络与内嵌资源跳过。
     def test_relative_absolute_file_urls_and_remote(self):
         # 作用：相对路径、绝对路径和 file: 地址能定位；网络与内嵌资源跳过。
