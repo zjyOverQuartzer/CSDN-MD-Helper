@@ -811,10 +811,10 @@ class Application(tk.Tk):
         self._stacked_layout = None
         self._compact_form_layout = None
 
-        # 左右分区分别承担操作和观察进度；扩大窗口时两个区域一起伸展。
+        # 操作区保持自然宽度；窗口变宽时让结果区获得额外空间。
         page.grid_rowconfigure(0, weight=1)
-        page.grid_columnconfigure(0, weight=5)
-        page.grid_columnconfigure(1, weight=4)
+        page.grid_columnconfigure(0, weight=0, minsize=self._dpi_pixels(440))
+        page.grid_columnconfigure(1, weight=1)
         self.task_panel = tk.Frame(page, background=colors['surface'], highlightbackground=colors['border'],
                                    highlightthickness=1, borderwidth=0)
         self.task_panel.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
@@ -1091,20 +1091,22 @@ class Application(tk.Tk):
         if width <= 1 or height <= 1:  # 窗口尚未完成尺寸计算时等待下一次配置事件。
             return
         form_width = self._horizontal_form_width()
-        needed_width = max(self.task_panel.winfo_reqwidth(), form_width + 42) + self.activity_panel.winfo_reqwidth() + 16
+        # 双栏需同时容纳舒适的表单宽度与结果区，窄屏才改成上下排列。
+        needed_width = (max(self.task_panel.winfo_reqwidth(), form_width + 42, self._dpi_pixels(440))
+                        + self.activity_panel.winfo_reqwidth() + 16)
         stacked = width < needed_width
         if stacked != self._stacked_layout:
             self._stacked_layout = stacked
             if stacked:  # 窄屏时把进度区放到操作区下方，避免左右控件互相挤压。
-                self.page_content.grid_columnconfigure(0, weight=1)
+                self.page_content.grid_columnconfigure(0, weight=1, minsize=0)
                 self.page_content.grid_columnconfigure(1, weight=0)
                 self.page_content.grid_rowconfigure(0, weight=0)
                 self.page_content.grid_rowconfigure(1, weight=1)
                 self.task_panel.grid_configure(row=0, column=0, padx=0, pady=(0, 8))
                 self.activity_panel.grid_configure(row=1, column=0, padx=0, pady=(8, 0))
-            else:  # 空间足够时恢复用户选择的左右双栏方案。
-                self.page_content.grid_columnconfigure(0, weight=5)
-                self.page_content.grid_columnconfigure(1, weight=4)
+            else:  # 空间足够时恢复双栏，操作区不随窗口无限拉宽。
+                self.page_content.grid_columnconfigure(0, weight=0, minsize=self._dpi_pixels(440))
+                self.page_content.grid_columnconfigure(1, weight=1)
                 self.page_content.grid_rowconfigure(0, weight=1)
                 self.page_content.grid_rowconfigure(1, weight=0)
                 self.task_panel.grid_configure(row=0, column=0, padx=(0, 8), pady=0)

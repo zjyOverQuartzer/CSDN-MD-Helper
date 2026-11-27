@@ -597,6 +597,50 @@ class PreflightWorkerTest(unittest.TestCase):
 class AppUiScalingTest(unittest.TestCase):
     # 作用：验证不同系统缩放比例下关键控件不会被裁掉。
     # 使用场景：修改字体、间距或窗口最小尺寸后执行。
+    def test_resizing_keeps_form_width_and_restores_two_columns(self):
+        # 作用：验证窗口缩放时左侧表单不被拉宽，右侧结果区接收新增空间。
+        # 使用场景：连续缩放、切换结果页和从窄屏恢复到宽屏时执行。
+        original = tk.Tk.__init__
+        with patch.object(app, 'BrowserWorker', DummyWorker), \
+                patch.object(tk.Tk, '__init__', hidden_tk_init(original)), \
+                patch.object(app.Application, '_available_window_size', return_value=(4000, 3000)):
+            window = app.Application()
+            try:
+                window.deiconify()
+                window.minsize(1, 1)
+                window.geometry(f'{window._dpi_pixels(1200)}x{window._dpi_pixels(760)}')
+                window.update()
+                self.assertFalse(window._stacked_layout)
+                form_width = window.task_panel.winfo_width()
+                result_width = window.activity_panel.winfo_width()
+
+                window.geometry(f'{window._dpi_pixels(1800)}x{window._dpi_pixels(800)}')
+                window.update()
+                self.assertLessEqual(abs(window.task_panel.winfo_width() - form_width), 3)
+                self.assertGreater(window.activity_panel.winfo_width(), result_width + window._dpi_pixels(300))
+
+                window.output_notebook.select(window.results_tab)
+                window.update()
+                self.assertLessEqual(abs(window.task_panel.winfo_width() - form_width), 3)
+                self.assertTrue(window.image_table.tree.winfo_ismapped())
+
+                window.geometry(f'{window._dpi_pixels(500)}x{window._dpi_pixels(700)}')
+                window.update()
+                self.assertTrue(window._stacked_layout)
+                window.geometry(f'{window._dpi_pixels(1500)}x{window._dpi_pixels(800)}')
+                window.update()
+                self.assertFalse(window._stacked_layout)
+                restored_width = window.task_panel.winfo_width()
+                window.geometry(f'{window._dpi_pixels(1800)}x{window._dpi_pixels(800)}')
+                window.update()
+                self.assertLessEqual(abs(window.task_panel.winfo_width() - restored_width), 3)
+                self.assertTrue(window.process_button.winfo_ismapped())
+                self.assertTrue(window.image_table.tree.winfo_ismapped())
+            finally:
+                window.close_app()
+                window = None
+                gc.collect()
+
     def test_default_window_and_icons_follow_dpi_scaling(self):
         # 作用：验证 DPI 提高后默认窗口和线条图标按比例增大。
         # 使用场景：避免启用高 DPI 后字体清晰了，但窗口和图标反而明显变小。
@@ -702,7 +746,7 @@ class AppUiScalingTest(unittest.TestCase):
                 self.assertEqual(window._scroll_page(SimpleNamespace(widget=window.file_entry, delta=-120)), 'break')
                 self.assertGreater(window.page_canvas.yview()[0], 0)
                 self.assertIsNone(window._scroll_page(SimpleNamespace(widget=window.log, delta=-120)))
-                window.geometry('1100x800')  # 窗口变宽后应恢复用户选择的双栏布局。
+                window.geometry('1500x800')  # 宽度足以容纳舒适的表单和结果区时恢复双栏。
                 window.update()
                 self.assertFalse(window._stacked_layout)
                 window.geometry('700x480')
