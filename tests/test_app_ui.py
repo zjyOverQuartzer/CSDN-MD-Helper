@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app
 
@@ -49,6 +49,37 @@ def hidden_tk_init(original, scale=None):
         if scale is not None:
             window.tk.call('tk', 'scaling', scale)
     return initialize
+
+
+class ResizeDrawingBufferTest(unittest.TestCase):
+    # 作用：验证临时缓冲会自动恢复，避免尺寸变化后长期拖慢界面。
+    # 使用场景：不依赖真实 CSDN，也不需要修改当前窗口或系统设置。
+    def test_resize_buffer_coalesces_and_preserves_other_styles(self):
+        class FakeUser32:
+            style = 0x100
+
+            def GetWindowLongW(self, hwnd, index):
+                return self.style
+
+            def SetWindowLongW(self, hwnd, index, style):
+                previous, self.style = self.style, style
+                return previous
+
+        window = Mock()
+        window.after.side_effect = ['first', 'second']
+        buffer = object.__new__(app.ResizeDrawingBuffer)
+        buffer.window = window
+        buffer.user32 = FakeUser32()
+        buffer.ctypes = SimpleNamespace(set_last_error=lambda value: None, get_last_error=lambda: 0)
+        buffer.hwnd, buffer.timer, buffer.active, buffer.last_size = 1, None, False, None
+        buffer._on_configure(SimpleNamespace(widget=window, width=1000, height=700))
+        self.assertTrue(buffer.user32.style & 0x02000000)
+        buffer._on_configure(SimpleNamespace(widget=window, width=1100, height=800))
+        window.after_cancel.assert_called_once_with('first')
+        buffer.user32.style |= 0x200  # 其他样式中途变化时，释放缓冲不能覆盖它。
+        buffer._release()
+        self.assertEqual(buffer.user32.style, 0x300)
+        self.assertFalse(buffer.active)
 
 
 class AppUiTest(unittest.TestCase):

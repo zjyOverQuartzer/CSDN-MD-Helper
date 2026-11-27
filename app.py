@@ -56,6 +56,86 @@ def enable_system_dpi_awareness():
         pass  # 系统不支持该接口时保留原有行为，不阻止程序启动。
 
 
+class ResizeDrawingBuffer:
+    # 作用：尺寸变化期间临时缓冲窗口绘制，减少子控件尚未画好时的黑块。
+    # 使用场景：Windows 主窗口缩放、最大化或还原；稳定后立即恢复正常绘制。
+    def __init__(self, window):
+        # 作用：准备当前窗口的绘制状态，非 Windows 或透明测试窗口不启用。
+        # 使用场景：主窗口创建完成、原生句柄已经存在时调用。
+        self.window = window
+        self.user32 = None
+        self.hwnd = None
+        self.timer = None
+        self.active = False
+        self.last_size = None
+        if os.name != 'nt':
+            return
+        try:
+            # Windows 的透明窗口和双缓冲组合可能严重影响响应，不在该情况下启用。
+            if float(window.attributes('-alpha')) < 1:
+                return
+            import ctypes
+            from ctypes import wintypes
+
+            self.ctypes = ctypes
+            self.user32 = ctypes.WinDLL('user32', use_last_error=True)
+            self.user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+            self.user32.GetAncestor.restype = wintypes.HWND
+            self.user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+            self.user32.GetWindowLongW.restype = wintypes.LONG
+            self.user32.SetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int, wintypes.LONG)
+            self.user32.SetWindowLongW.restype = wintypes.LONG
+            self.hwnd = self.user32.GetAncestor(window.winfo_id(), 2)  # 获取有标题栏的顶层窗口。
+            if self.hwnd:
+                window.bind('<Configure>', self._on_configure, add='+')
+        except (AttributeError, OSError, ValueError, tk.TclError):
+            self.user32 = None  # 系统接口不可用时仍可正常使用程序。
+
+    def _on_configure(self, event):
+        # 作用：合并连续的尺寸变化，仅在需要时临时打开双缓冲。
+        # 使用场景：用户拖动窗口或切换最大化、还原状态时自动调用。
+        if event.widget is not self.window or event.width <= 1 or event.height <= 1:
+            return
+        size = (event.width, event.height)
+        if size == self.last_size:
+            return  # 纯粹移动窗口时不改变绘制方式。
+        self.last_size = size
+        try:
+            if self.timer is not None:
+                self.window.after_cancel(self.timer)
+            if not self.active:
+                style = self.user32.GetWindowLongW(self.hwnd, -20)
+                if style & 0x02000000:
+                    return  # 已经由其他设置启用时，不能替别人关闭。
+                self.ctypes.set_last_error(0)
+                previous = self.user32.SetWindowLongW(self.hwnd, -20, style | 0x02000000)
+                if previous == 0 and self.ctypes.get_last_error():
+                    return
+                self.active = True
+            self.timer = self.window.after(300, self._release)
+        except (AttributeError, OSError, tk.TclError):
+            self._release()
+
+    def _release(self):
+        # 作用：恢复原来的绘制方式，避免常驻双缓冲导致日常操作迟缓。
+        # 使用场景：窗口尺寸稳定或主窗口关闭时调用。
+        self.timer = None
+        if self.active:
+            try:
+                style = self.user32.GetWindowLongW(self.hwnd, -20)
+                self.user32.SetWindowLongW(self.hwnd, -20, style & ~0x02000000)
+            except (AttributeError, OSError):
+                pass
+            self.active = False
+
+    def close(self):
+        # 作用：取消尚未触发的恢复任务，并释放本对象启用的窗口样式。
+        # 使用场景：助手真正退出前调用；不会影响其他窗口或系统设置。
+        if self.timer is not None:
+            self.window.after_cancel(self.timer)
+        self._release()
+
+
 # 浏览器操作可能需要等待网络，放在后台线程中执行，避免 Tk 界面卡住。
 # commands 接收界面发出的任务，events 向界面发送日志、确认请求和处理结果。
 class BrowserWorker(threading.Thread):
@@ -707,6 +787,7 @@ class Application(tk.Tk):
         self.active_action = None  # 区分打开浏览器和处理文章，避免显示错误的进度状态。
         self.build_ui()  # 根据上述状态变量创建并排列控件。
         self._fit_minimum_window()  # 根据实际字体缩放调整最小尺寸，避免控件被挤出窗口。
+        self.resize_buffer = ResizeDrawingBuffer(self)  # 仅在尺寸变化期间缓冲绘制。
         self._poll_after_id = self.after(100, self.poll_events)  # 定时读取事件，退出时取消回调。
         self.protocol('WM_DELETE_WINDOW', self.close_app)  # 接管窗口关闭操作，先做必要确认。
 
@@ -1448,6 +1529,7 @@ class Application(tk.Tk):
                 APP_NAME, '退出将关闭助手打开的浏览器窗口。请先确认文章已保存。\n\n确定退出吗？', parent=self):
             return
         self.after_cancel(self._poll_after_id)  # 关闭前取消尚未执行的界面轮询。
+        self.resize_buffer.close()  # 避免窗口退出后仍留有定时回调。
         # 通知后台线程关闭浏览器上下文，再销毁本地界面。
         self.commands.put(None)  # 发送退出标记。
         self.worker.join(timeout=5)  # 最多等待后台线程 5 秒。
