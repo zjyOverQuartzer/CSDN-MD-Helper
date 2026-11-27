@@ -599,6 +599,49 @@ class AppUiTest(unittest.TestCase):
             dialog.destroy()
 
 
+class AppUiSmallWindowTest(unittest.TestCase):
+    # 作用：检查小窗口切换结果页时，图片清单获得足够高度。
+    # 使用场景：CI 或用户屏幕空间有限，页面需要通过外层滚动查看完整内容。
+    def test_results_tab_recalculates_layout_after_content_size_changes(self):
+        original = tk.Tk.__init__
+        with patch.object(app, 'BrowserWorker', DummyWorker), \
+                patch.object(tk.Tk, '__init__', hidden_tk_init(original, scale=96 / 72)), \
+                patch.object(app.Application, '_available_window_size', return_value=(1024, 668)):
+            try:
+                window = app.Application()
+            except tk.TclError as exc:
+                self.skipTest(f'Tk 界面不可用：{exc}')
+            try:
+                window.deiconify()
+                window.update()
+                temporary = tempfile.TemporaryDirectory()
+                self.addCleanup(temporary.cleanup)
+                path = Path(temporary.name) / '文章.md'
+                table = window.image_table
+                window.results_tab_button.invoke()
+                table.set_preflight(app.image_preflight('![图片](one.png)', path))
+                window.update()
+
+                # 单张图片必须完整可见；内容过高时应扩展页面而不是压扁清单。
+                self.assertGreaterEqual(window.page_content.winfo_height(), window.page_content.winfo_reqheight())
+                self.assertEqual(table.tree.yview(), (0.0, 1.0))
+                self.assertFalse(table.vertical_scroll.winfo_ismapped())
+
+                # 多张图片仍应显示滚动条，并允许查看最后一张图片。
+                text = '\n'.join(f'![图片{i}](image{i}.png)' for i in range(40))
+                table.set_preflight(app.image_preflight(text, path))
+                window.update()
+                self.assertTrue(table.vertical_scroll.winfo_ismapped())
+                table.tree.yview_moveto(1)
+                window.update()
+                self.assertEqual(table.tree.yview()[1], 1.0)
+                self.assertTrue(table.tree.bbox(table.tree.get_children()[-1]))
+            finally:
+                window.close_app()
+                window = None
+                gc.collect()
+
+
 class PreflightWorkerTest(unittest.TestCase):
     # 作用：验证后台线程根据处理模式选择正确正文，并等待用户确认。
     # 使用场景：不连接浏览器，检查预检取消时不会调用正文处理逻辑。

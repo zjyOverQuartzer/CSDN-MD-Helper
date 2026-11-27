@@ -1028,6 +1028,9 @@ class Application(tk.Tk):
         self.results_tab.pack_propagate(showing_results)
         self.log_tab_button.configure(style='WorkspaceTab.TButton' if showing_results else 'WorkspaceSelected.TButton')
         self.results_tab_button.configure(style='WorkspaceSelected.TButton' if showing_results else 'WorkspaceTab.TButton')
+        # 先让 Tk 完成当前页的尺寸传递，再根据最新需求计算外层页面与滚动范围。
+        # 否则小窗口切换到图片结果时，页面仍按日志页高度布局，可能压扁图片清单。
+        self.update_idletasks()
         self._schedule_page_layout()
 
     def _configure_scrollbars(self, style: ttk.Style):
